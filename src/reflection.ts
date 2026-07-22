@@ -42,8 +42,7 @@ const ANTHROPIC_BASE_URL =
 // So default to Haiku, which the standard credential supports, and let installs
 // with a Sonnet-capable key (a real sk-ant-api… key, or one injected via the
 // OneCLI gateway) opt in with REFLECTION_MODEL=claude-sonnet-4-6.
-const REFLECTION_MODEL =
-  process.env.REFLECTION_MODEL || envConfig.REFLECTION_MODEL || 'claude-haiku-4-5-20251001';
+const REFLECTION_MODEL = process.env.REFLECTION_MODEL || envConfig.REFLECTION_MODEL || 'claude-haiku-4-5-20251001';
 const MAX_CONVERSATION_CHARS = 40_000;
 const USER_BUDGET_CHARS = 2000; // ~500 tokens
 const MEMORY_BUDGET_CHARS = 3200; // ~800 tokens
@@ -184,7 +183,9 @@ registerApprovalHandler('save_learned_skill', async ({ payload, notify }) => {
     return;
   }
   const written = writeSkillFile(folder, { name, description, content });
-  notify(written ? `Learned skill "${name}" saved.` : `Learned skill "${name}" not saved (already exists or invalid name).`);
+  notify(
+    written ? `Learned skill "${name}" saved.` : `Learned skill "${name}" not saved (already exists or invalid name).`,
+  );
 });
 
 interface ConversationSlice {

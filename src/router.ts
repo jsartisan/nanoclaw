@@ -474,11 +474,7 @@ async function attachThreadContext(event: InboundEvent, threadId: string): Promi
   if (!adapter?.supportsThreads || !adapter.fetchThreadContext) return event.message.content;
 
   try {
-    const ctx: ThreadContextEntry[] = await adapter.fetchThreadContext(
-      event.platformId,
-      threadId,
-      event.message.id,
-    );
+    const ctx: ThreadContextEntry[] = await adapter.fetchThreadContext(event.platformId, threadId, event.message.id);
     if (ctx.length === 0) return event.message.content;
     const parsed = JSON.parse(event.message.content) as Record<string, unknown>;
     log.info('Attached thread context', {
@@ -616,4 +612,3 @@ function messageIdForAgent(baseId: string | undefined, agentGroupId: string): st
   const id = baseId && baseId.length > 0 ? baseId : generateId();
   return `${id}:${agentGroupId}`;
 }
-
