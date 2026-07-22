@@ -35,15 +35,9 @@ tasks:
       - node scripts/dev.mjs tail {{index .MATCH 0}}
 
   install:
-    desc: Install host (pnpm) and web (bun) dependencies
+    desc: Install host + web dependencies (web is a pnpm workspace member)
     cmds:
       - pnpm install --frozen-lockfile
-      - task: install:web
-
-  install:web:
-    dir: web
-    cmds:
-      - bun install --frozen-lockfile
 
   build:
     desc: Build the host (tsc) and the admin web UI (vite)
@@ -54,7 +48,7 @@ tasks:
   build:web:
     dir: web
     cmds:
-      - bun run build
+      - pnpm run build
 
   typecheck:
     desc: Typecheck host and web
@@ -65,4 +59,4 @@ tasks:
   typecheck:web:
     dir: web
     cmds:
-      - bun run typecheck
+      - pnpm run typecheck

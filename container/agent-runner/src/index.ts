@@ -72,12 +72,41 @@ async function main(): Promise<void> {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
+  // Outbound-HTTP env the clawie MCP server needs to reach external APIs
+  // (e.g. the generate_image tool calling Vertex AI / AI Platform in express
+  // mode): the OneCLI proxy + CA cert so requests route through the gateway
+  // for credential injection, plus the Vertex express-mode API key. The SDK
+  // spawns each MCP server as a child process, so without forwarding these the
+  // subprocess can't see them.
+  const PASSTHROUGH_ENV_KEYS = [
+    'HTTPS_PROXY',
+    'https_proxy',
+    'HTTP_PROXY',
+    'http_proxy',
+    'NO_PROXY',
+    'no_proxy',
+    'NODE_EXTRA_CA_CERTS',
+    'SSL_CERT_FILE',
+    // Vertex AI (AI Platform) express mode — API key auth.
+    'VERTEX_API_KEY',
+    'GOOGLE_API_KEY',
+    'GEMINI_API_KEY',
+    'VERTEX_API_VERSION',
+    'GEMINI_IMAGE_MODEL',
+    'GEMINI_IMAGE_TIMEOUT_MS',
+  ];
+  const clawieServerEnv: Record<string, string> = {};
+  for (const key of PASSTHROUGH_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) clawieServerEnv[key] = value;
+  }
+
   // Build MCP servers config: clawie built-in + any from container.json
   const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
     clawie: {
       command: 'bun',
       args: ['run', mcpServerPath],
-      env: {},
+      env: clawieServerEnv,
     },
   };
 

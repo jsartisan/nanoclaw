@@ -7,14 +7,79 @@
  * reaches into this module via the delivery-action registry and we apply the
  * change to inbound.db here.
  */
+import fs from 'fs';
+
 import type Database from 'better-sqlite3';
 
 import { wakeContainer } from '../../container-runner.js';
-import { getSession } from '../../db/sessions.js';
+import { getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { log } from '../../log.js';
-import { writeSessionMessage } from '../../session-manager.js';
+import { inboundDbPath, openInboundDb, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { cancelTask, insertTask, pauseTask, resumeTask, updateTask, type TaskUpdate } from './db.js';
+
+/**
+ * A scheduled task lives in exactly one session's inbound.db, but an agent
+ * group can run many sessions (one per messaging group / thread). The agent
+ * may call pause/cancel/resume/update from a *different* session than the one
+ * that owns the task — e.g. paused from webchat a task that was scheduled in a
+ * DM. Applying the change only to the caller's DB silently no-ops in that case.
+ *
+ * This fans the mutation out across every session in the agent group. The
+ * caller's already-open connection is reused; sibling sessions get a short-
+ * lived connection each. Returns the total rows touched so callers can detect
+ * a no-match (task id that exists in no session).
+ */
+function applyAcrossGroupSessions(
+  callerSession: Session,
+  callerDb: Database.Database,
+  apply: (db: Database.Database) => number,
+): number {
+  let touched = apply(callerDb);
+  for (const sibling of getSessionsByAgentGroup(callerSession.agent_group_id)) {
+    if (sibling.id === callerSession.id) continue;
+    // openInboundDb would CREATE the file if the directory exists — an empty
+    // shell DB the real session bootstrap should own. Skip absent siblings.
+    if (!fs.existsSync(inboundDbPath(callerSession.agent_group_id, sibling.id))) continue;
+    let db: Database.Database | undefined;
+    try {
+      db = openInboundDb(callerSession.agent_group_id, sibling.id);
+      touched += apply(db);
+    } catch (err) {
+      // Best-effort fan-out — a broken sibling DB must not fail the caller's
+      // mutation, but don't hide it entirely either.
+      log.warn('Task fan-out skipped a sibling session', { siblingSessionId: sibling.id, err });
+    } finally {
+      db?.close();
+    }
+  }
+  return touched;
+}
+
+/**
+ * Tell the agent its task mutation matched nothing live, then wake it so the
+ * message is seen. Mirrors update_task's long-standing behaviour for the other
+ * verbs, so a mistyped or stale id surfaces instead of failing silently.
+ */
+function notifyNoMatch(session: Session, verb: string, taskId: string): void {
+  writeSessionMessage(session.agent_group_id, session.id, {
+    id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    platformId: session.agent_group_id,
+    channelType: 'agent',
+    threadId: null,
+    content: JSON.stringify({
+      text: `${verb}: no live task matched id "${taskId}".`,
+      sender: 'system',
+      senderId: 'system',
+    }),
+  });
+  const fresh = getSession(session.id);
+  if (fresh) {
+    wakeContainer(fresh).catch((err) => log.error('Failed to wake container after task notification', { verb, err }));
+  }
+}
 
 export async function handleScheduleTask(
   content: Record<string, unknown>,
@@ -41,32 +106,35 @@ export async function handleScheduleTask(
 
 export async function handleCancelTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  cancelTask(inDb, taskId);
-  log.info('Task cancelled', { taskId });
+  const touched = applyAcrossGroupSessions(session, inDb, (db) => cancelTask(db, taskId));
+  log.info('Task cancelled', { taskId, touched });
+  if (touched === 0) notifyNoMatch(session, 'cancel_task', taskId);
 }
 
 export async function handlePauseTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  pauseTask(inDb, taskId);
-  log.info('Task paused', { taskId });
+  const touched = applyAcrossGroupSessions(session, inDb, (db) => pauseTask(db, taskId));
+  log.info('Task paused', { taskId, touched });
+  if (touched === 0) notifyNoMatch(session, 'pause_task', taskId);
 }
 
 export async function handleResumeTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  resumeTask(inDb, taskId);
-  log.info('Task resumed', { taskId });
+  const touched = applyAcrossGroupSessions(session, inDb, (db) => resumeTask(db, taskId));
+  log.info('Task resumed', { taskId, touched });
+  if (touched === 0) notifyNoMatch(session, 'resume_task', taskId);
 }
 
 export async function handleUpdateTask(
@@ -84,30 +152,7 @@ export async function handleUpdateTask(
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
   }
-  const touched = updateTask(inDb, taskId, update);
+  const touched = applyAcrossGroupSessions(session, inDb, (db) => updateTask(db, taskId, update));
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });
-  if (touched === 0) {
-    // Notify the agent that update_task matched nothing. Replicates the
-    // old notifyAgent helper that used to live in delivery.ts — inlined
-    // here so scheduling doesn't depend on delivery's private helpers.
-    writeSessionMessage(session.agent_group_id, session.id, {
-      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: 'chat',
-      timestamp: new Date().toISOString(),
-      platformId: session.agent_group_id,
-      channelType: 'agent',
-      threadId: null,
-      content: JSON.stringify({
-        text: `update_task: no live task matched id "${taskId}".`,
-        sender: 'system',
-        senderId: 'system',
-      }),
-    });
-    const fresh = getSession(session.id);
-    if (fresh) {
-      wakeContainer(fresh).catch((err) =>
-        log.error('Failed to wake container after update_task notification', { err }),
-      );
-    }
-  }
+  if (touched === 0) notifyNoMatch(session, 'update_task', taskId);
 }

@@ -94,6 +94,25 @@ function extractTextContent(raw: string): string | null {
   }
 }
 
+/**
+ * Normalize a session-DB timestamp to epoch ms for cross-table sorting.
+ *
+ * The two sides of a conversation write timestamps in different shapes:
+ *   - inbound (user):  `new Date().toISOString()` → "2026-06-17T10:00:00.000Z"
+ *   - outbound (agent): SQLite `datetime('now')`  → "2026-06-17 10:00:01" (UTC,
+ *     space-separated, no `T`/`Z`)
+ *
+ * Lexicographic comparison breaks because the space sorts before `T`, floating
+ * every agent line above every user line. And a naive `Date.parse` of the
+ * SQLite form reads it as *local* time, shifting it by the UTC offset. Both are
+ * actually UTC, so we tag the space-separated form as UTC before parsing.
+ */
+function timestampToEpoch(ts: string): number {
+  const normalized = ts.includes('T') ? ts : `${ts.replace(' ', 'T')}Z`;
+  const ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
 function readHistory(agentGroupId: string, messagingGroupId: string, limit: number): ChatHistoryEntry[] {
   const session = findSessionForAgent(agentGroupId, messagingGroupId, null);
   if (!session) return [];
@@ -126,7 +145,7 @@ function readHistory(agentGroupId: string, messagingGroupId: string, limit: numb
     outDb.close();
   }
 
-  entries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  entries.sort((a, b) => timestampToEpoch(a.timestamp) - timestampToEpoch(b.timestamp));
   return entries.slice(Math.max(0, entries.length - limit));
 }
 

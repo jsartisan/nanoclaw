@@ -124,7 +124,7 @@ function buildDestinationsSection(): string {
   );
   lines.push('');
   lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    'A `<message to="name">` block is delivered **only when it is part of your final response** — the text you end your turn with. To send anything *before* your turn ends — a quick "on it", a status update during a long task, or a progressive result — you MUST call the `send_message` MCP tool. A `<message>` block you write mid-turn and then keep working past is treated as scratchpad and **is never sent**. This bites hardest on long, multi-step tasks (deep research, multi-tool runs): if you say "next message will be X" and then continue working, you must deliver X with `send_message` — a bare `<message>` block left behind as you work will silently vanish. Each `send_message` call and each final-response `<message>` block lands as its own message, so they read as a sequence rather than one combined reply.',
   );
   return lines.join('\n');
 }

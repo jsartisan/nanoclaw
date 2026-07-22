@@ -15,6 +15,11 @@ import Database from 'better-sqlite3';
  */
 
 const Q = path.resolve(__dirname, 'q.ts');
+// Invoke the tsx binary directly rather than through `pnpm exec`: pnpm may
+// print workspace warnings (e.g. a stray pnpm.overrides in an
+// installation-specific groups/<folder> package.json) to stdout, which would
+// pollute the exact-output assertions below.
+const TSX = path.resolve(__dirname, '..', 'node_modules', '.bin', 'tsx');
 
 describe('scripts/q.ts', () => {
   let tempDir: string;
@@ -36,7 +41,7 @@ describe('scripts/q.ts', () => {
   });
 
   function run(sql: string): { stdout: string; stderr: string; status: number } {
-    const r = spawnSync('pnpm', ['exec', 'tsx', Q, dbPath, sql], {
+    const r = spawnSync(TSX, [Q, dbPath, sql], {
       encoding: 'utf-8',
       cwd: path.resolve(__dirname, '..'),
     });
@@ -96,7 +101,7 @@ describe('scripts/q.ts', () => {
   });
 
   it('exits 2 with usage when args are missing', () => {
-    const r = spawnSync('pnpm', ['exec', 'tsx', Q], {
+    const r = spawnSync(TSX, [Q], {
       encoding: 'utf-8',
       cwd: path.resolve(__dirname, '..'),
     });

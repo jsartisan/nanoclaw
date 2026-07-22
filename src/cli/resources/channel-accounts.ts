@@ -63,6 +63,22 @@ registerResource({
         'Whether this is the default account for its channel type. The default bot owns legacy account-less chats. Set via the set-default verb, not here.',
       generated: true,
     },
+    // Read-only here so list/get surface the current engagement (the portal's
+    // "Reachable from" label reads these). Edited via the set-engagement verb,
+    // never as plain create/update columns — hence `generated`, which keeps
+    // them in the SELECT projection but out of the create/update input.
+    {
+      name: 'engage_mode',
+      type: 'string',
+      description: 'When the bot engages: mention | mention-sticky | pattern. Set via set-engagement.',
+      generated: true,
+    },
+    {
+      name: 'engage_pattern',
+      type: 'string',
+      description: 'Regex source for engage_mode=pattern. Set via set-engagement.',
+      generated: true,
+    },
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
   ],
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval' },
@@ -158,7 +174,9 @@ registerResource({
           try {
             new RegExp(engagePattern);
           } catch (e) {
-            throw new Error(`invalid engage_pattern regex: ${e instanceof Error ? e.message : String(e)}`);
+            throw new Error(`invalid engage_pattern regex: ${e instanceof Error ? e.message : String(e)}`, {
+              cause: e,
+            });
           }
         }
 

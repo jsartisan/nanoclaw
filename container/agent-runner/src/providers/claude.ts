@@ -318,8 +318,15 @@ function transcriptStartMs(transcriptPath: string): number | null {
  * Operator override: set CLAUDE_CODE_AUTO_COMPACT_WINDOW in the host env to
  * raise or lower the threshold without editing source — useful when running
  * with a 1M-context model variant or when emergency-tuning a deployment.
+ *
+ * Semantics (verified against Claude Code's autoCompact source): the value is
+ * the context CAPACITY used for compaction math, min-capped at the model's
+ * real window — the actual trigger is capacity minus reserved summary-output
+ * tokens minus a safety buffer. So 200000 on a 200k model = Claude Code's
+ * stock behavior (compact near the top, safely before the hard limit), and a
+ * lower value compacts proportionally earlier.
  */
-const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '100000';
+const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '200000';
 
 /**
  * Stale-session detection. Matches Claude Code's error text when a
@@ -447,9 +454,18 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
           yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
+          // Compaction is the SDK garbage-collecting context — NOT an agent
+          // answer. Emit as `progress` (log-only), never `result`. A fake
+          // `result` flows through dispatchResultText, which (a) logs a
+          // spurious "nothing was sent" warning, (b) prematurely
+          // markCompleted()s the batch, and (c) worst of all, trips the
+          // one-shot unwrapped-output nudge — so the genuine unwrapped
+          // answer that follows the compaction never gets re-prompted to
+          // re-wrap. Long token-heavy turns compact several times, burning a
+          // nudge each time. See poll-loop.ts result handler.
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
+          yield { type: 'progress', message: `Context compacted${detail}.` };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };

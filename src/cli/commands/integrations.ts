@@ -181,13 +181,7 @@ register({
     if (def.onecliSecret && key && url) {
       try {
         const hostPattern = new URL(url).hostname;
-        onecliSecretId = await provisionOneCLISecret(
-          groupId,
-          agentGroup.name,
-          key,
-          hostPattern,
-          def.onecliSecret,
-        );
+        onecliSecretId = await provisionOneCLISecret(groupId, agentGroup.name, key, hostPattern, def.onecliSecret);
         log.info('OneCLI secret provisioned for integration', { integration: def.id, groupId, onecliSecretId });
       } catch (err) {
         log.error('Failed to provision OneCLI secret — falling back to env-based credential', {

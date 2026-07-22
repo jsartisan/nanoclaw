@@ -29,7 +29,7 @@
 import type Database from 'better-sqlite3';
 import fs from 'fs';
 
-import { getActiveSessions } from './db/sessions.js';
+import { getActiveSessions, getSessionsByAgentGroup } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
   countDueMessages,
@@ -208,7 +208,10 @@ async function sweepSession(session: Session): Promise<void> {
 
     // 6. Post-session reflection: extract memories + learned skills from the
     // conversation once the container has stopped and left behind messages_out.
-    if (!alive && outDb) {
+    // Gate on the whole GROUP being quiet, not just this session: USER.md /
+    // MEMORY.md are per-group files, and a sibling session's live container
+    // may be writing them while we'd be merging from a stale snapshot.
+    if (!alive && outDb && !anyGroupContainerRunning(agentGroup.id)) {
       const { reflectOnSession } = await import('./reflection.js');
       await reflectOnSession(session.agent_group_id, session.id).catch((err) =>
         log.warn('Reflection failed', { sessionId: session.id, err }),
@@ -218,6 +221,10 @@ async function sweepSession(session: Session): Promise<void> {
     inDb.close();
     outDb?.close();
   }
+}
+
+function anyGroupContainerRunning(agentGroupId: string): boolean {
+  return getSessionsByAgentGroup(agentGroupId).some((s) => isContainerRunning(s.id));
 }
 
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {

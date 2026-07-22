@@ -24,7 +24,14 @@ import { getChannelAccounts, getAccountSecrets } from '../db/channel-accounts.js
 import { log } from '../log.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import type { ChannelAdapter, ChannelSetup, InboundMessage, OutboundMessage, SecretValidation } from './adapter.js';
+import type {
+  ChannelAdapter,
+  ChannelSetup,
+  InboundMessage,
+  OutboundMessage,
+  SecretValidation,
+  ThreadContextEntry,
+} from './adapter.js';
 
 // ---------------------------------------------------------------------------
 // Platform/thread id encoding (must match the legacy Chat SDK adapter)
@@ -48,6 +55,42 @@ interface DecodedAddress {
   channel: string;
   threadTs?: string;
 }
+
+// ---------------------------------------------------------------------------
+// "Thinking" indicator (assistant.threads.setStatus)
+//
+// Slack has no generic bot "typing…" API the way Telegram does. The closest
+// equivalent is assistant.threads.setStatus, which renders "<App> is
+// thinking…" at the bottom of an assistant thread and can rotate through a
+// set of loading messages for personality. Slack auto-clears the status when
+// the app posts its reply (and after a 2-minute timeout otherwise), so the
+// typing-refresh module just needs to keep re-firing it while the agent works.
+// ---------------------------------------------------------------------------
+
+// Cap on how many prior thread messages we pull in for context when the bot is
+// first mentioned mid-thread. Bounds both the Slack API payload and the tokens
+// spent re-hydrating the conversation. Slack returns newest-last within a page.
+const THREAD_CONTEXT_LIMIT = 50;
+
+// conversations.replies paginates oldest-first, so reaching the *newest*
+// messages of a long thread means walking cursor pages. This caps the walk so
+// one inbound message can't fan out into dozens of Slack API calls on a
+// pathological thread (at 50/page this covers threads up to ~500 messages).
+const THREAD_CONTEXT_MAX_PAGES = 10;
+
+// Per-message cap on harvested context text. Alert payloads can embed large
+// metadata/stack-trace blobs; this keeps one noisy message from dominating the
+// agent's prompt while still carrying a full typical stack trace.
+const THREAD_CONTEXT_MAX_CHARS = 4000;
+
+const THINKING_STATUS = 'is thinking…';
+const THINKING_LOADING_MESSAGES = [
+  'Reading the conversation…',
+  'Thinking it through…',
+  'Checking the details…',
+  'Putting it together…',
+  'Almost there…',
+];
 
 /** Decode a platform_id or thread_id back into a channel + optional thread_ts. */
 function decodeAddress(id: string): DecodedAddress {
@@ -103,10 +146,16 @@ interface SlackMessageEvent {
   channel_type?: string;
   user?: string;
   bot_id?: string;
+  username?: string;
   text?: string;
   ts?: string;
   thread_ts?: string;
   files?: SlackFile[];
+  // Block Kit blocks (modern) and legacy attachments — alert/CI bots put the
+  // real detail here, with only a summary in `text`. Typed loosely; we harvest
+  // text nodes out of them rather than model the full Block Kit schema.
+  blocks?: unknown[];
+  attachments?: unknown[];
 }
 
 interface BlockActionsPayload {
@@ -230,6 +279,90 @@ function createSlackSocketAdapter({ botToken, appToken }: SlackAdapterDeps): Cha
     return out;
   }
 
+  /**
+   * Fetch the thread the agent was just pulled into, so it can see the
+   * conversation — the parent (often an alert from another bot) plus the
+   * surrounding messages it was never tagged in.
+   *
+   * We include every message *except this bot's own* and the triggering
+   * message, capped to the most recent THREAD_CONTEXT_LIMIT. Earlier this
+   * tried to be clever and only send messages "since the bot last posted",
+   * but that dropped the thread parent (which precedes the bot's first
+   * reply) — exactly the context an alert thread is about. Re-sending a
+   * handful of already-seen messages is a cheap price for never hiding the
+   * parent; the cap bounds the cost.
+   *
+   * Best-effort: any API failure yields an empty context rather than
+   * blocking the message. Exposed to the router via the adapter's
+   * `fetchThreadContext` method (below).
+   */
+  async function collectThreadContext(
+    channel: string,
+    threadTs: string,
+    currentTs: string,
+  ): Promise<ThreadContextEntry[]> {
+    try {
+      // conversations.replies paginates oldest-first (parent, then replies in
+      // chronological order) — a single `limit` page would return the OLDEST
+      // messages and silently drop the newest, which is the context a
+      // re-mention is about. Walk the cursor keeping a rolling window of the
+      // most recent messages, and pin the parent (usually the alert the whole
+      // thread is about) separately so it survives the window on long threads.
+      let parent: SlackMessageEvent | undefined;
+      let recent: SlackMessageEvent[] = [];
+      let totalInThread = 0;
+      let cursor: string | undefined;
+      for (let page = 0; page < THREAD_CONTEXT_MAX_PAGES; page++) {
+        const res = await web.conversations.replies({
+          channel,
+          ts: threadTs,
+          limit: THREAD_CONTEXT_LIMIT,
+          cursor,
+        });
+        const msgs = (res.messages ?? []) as SlackMessageEvent[];
+        totalInThread += msgs.length;
+        if (!parent) parent = msgs.find((m) => m.ts === threadTs);
+        recent = [...recent, ...msgs].slice(-THREAD_CONTEXT_LIMIT);
+        cursor = res.response_metadata?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+      if (parent && !recent.some((m) => m.ts === parent!.ts)) {
+        recent = [parent, ...recent.slice(-(THREAD_CONTEXT_LIMIT - 1))];
+      }
+
+      // "Self" here means *this* bot only — NOT the generic bot_message check
+      // isOwnMessage uses. Thread parents are often alerts from other bots
+      // (monitoring, CI), and those are exactly the context the agent needs,
+      // so they must be included, not skipped.
+      const isSelf = (m: SlackMessageEvent): boolean =>
+        (!!botUserId && m.user === botUserId) || (!!botId && m.bot_id === botId);
+
+      const out: ThreadContextEntry[] = [];
+      for (const m of recent) {
+        if (m.ts === currentTs) continue;
+        if (isSelf(m)) continue;
+        // Pull the full message — including Block Kit / attachment detail, not
+        // just the one-line `text` summary alert bots post.
+        const raw = extractSlackText(m);
+        if (!raw.trim()) continue;
+        // Human messages carry `user`; bot messages (alerts) carry `username`.
+        const sender = m.user ? await resolveUserName(m.user) : (m.username ?? 'bot');
+        out.push({ sender, text: await humanizeText(raw), time: tsToIso(m.ts ?? '') });
+      }
+
+      log.info('Slack thread context fetched', {
+        channel,
+        threadTs,
+        totalInThread,
+        included: out.length,
+      });
+      return out;
+    } catch (err) {
+      log.warn('Slack conversations.replies failed — no thread context', { channel, threadTs, err });
+      return [];
+    }
+  }
+
   async function handleMessageEvent(event: SlackMessageEvent): Promise<void> {
     // Only plain user messages. Edits/deletes/joins arrive as subtypes we skip;
     // file_share carries `files` and is kept (it has no disqualifying subtype
@@ -262,6 +395,11 @@ function createSlackSocketAdapter({ botToken, appToken }: SlackAdapterDeps): Cha
     if (event.files && event.files.length > 0) {
       content.attachments = await buildAttachments(event.files);
     }
+
+    // Thread-context backfill is NOT done here — the router drives it (on every
+    // engaging message, for any engage_mode) via the adapter's
+    // fetchThreadContext method. The adapter event handler has no view of
+    // wirings, so it can't know whether/when an agent is actually engaged.
 
     const inbound: InboundMessage = {
       id: ts,
@@ -445,6 +583,25 @@ function createSlackSocketAdapter({ botToken, appToken }: SlackAdapterDeps): Cha
       }
     },
 
+    async setTyping(platformId: string, threadId: string | null): Promise<void> {
+      const { channel, threadTs } = decodeAddress(threadId ?? platformId);
+      // setStatus is thread-scoped — without a thread_ts there's nothing to
+      // attach the "thinking…" indicator to, so there's nothing to do.
+      if (!channel || !threadTs) return;
+      try {
+        await web.assistant.threads.setStatus({
+          channel_id: channel,
+          thread_ts: threadTs,
+          status: THINKING_STATUS,
+          loading_messages: THINKING_LOADING_MESSAGES,
+        });
+      } catch (err) {
+        // Only assistant threads accept a status; normal channels/DMs reject
+        // it. Typing is best-effort, so swallow quietly to avoid log spam.
+        log.debug('Slack setStatus failed', { channel, threadTs, err });
+      }
+    },
+
     async openDM(userHandle: string): Promise<string> {
       const res = await web.conversations.open({ users: userHandle });
       const channel = res.channel?.id;
@@ -455,6 +612,18 @@ function createSlackSocketAdapter({ botToken, appToken }: SlackAdapterDeps): Cha
     async resolveChannelName(platformId: string): Promise<string | null> {
       const { channel } = decodeAddress(platformId);
       return resolveChannelNameRaw(channel);
+    },
+
+    async fetchThreadContext(
+      platformId: string,
+      threadId: string,
+      excludeMessageId?: string,
+    ): Promise<ThreadContextEntry[]> {
+      const { channel, threadTs } = decodeAddress(threadId || platformId);
+      // No thread ts → not a thread (or a thread root with no prior messages);
+      // nothing to backfill.
+      if (!channel || !threadTs) return [];
+      return collectThreadContext(channel, threadTs, excludeMessageId ?? '');
     },
 
     async teardown(): Promise<void> {
@@ -477,6 +646,57 @@ function createSlackSocketAdapter({ botToken, appToken }: SlackAdapterDeps): Cha
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Pull a readable text representation out of a Slack message.
+ *
+ * Alert/CI bots post a one-line summary in `text` but the real content (stack
+ * traces, metadata) in Block Kit `blocks` (or legacy `attachments`). We harvest
+ * every text node from those structures so the agent sees the whole alert, not
+ * just the headline, and fall back to `text` when there are no blocks. Capped
+ * so a single huge payload can't dominate the prompt.
+ */
+function extractSlackText(m: SlackMessageEvent): string {
+  const out: string[] = [];
+  harvestSlackText(m.blocks, out);
+  harvestSlackText(m.attachments, out);
+  // Drop blanks and repeats — the same headline often shows up in `text`, an
+  // attachment's `pretext`, AND a header block, not necessarily adjacently.
+  const seen = new Set<string>();
+  const deduped = out.filter((t) => {
+    const key = t.trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const rich = deduped.join('\n').trim();
+  const text = (rich || m.text || '').trim();
+  return text.length > THREAD_CONTEXT_MAX_CHARS ? `${text.slice(0, THREAD_CONTEXT_MAX_CHARS)}…` : text;
+}
+
+/**
+ * Recursively collect text from a Slack Block Kit / attachments structure.
+ * Grabs Slack text objects (`{ type: 'mrkdwn' | 'plain_text', text }`) and the
+ * legacy attachment string fields, descending into nested objects/arrays.
+ */
+function harvestSlackText(node: unknown, out: string[]): void {
+  if (Array.isArray(node)) {
+    for (const n of node) harvestSlackText(n, out);
+    return;
+  }
+  if (!node || typeof node !== 'object') return;
+  const o = node as Record<string, unknown>;
+  if ((o.type === 'mrkdwn' || o.type === 'plain_text') && typeof o.text === 'string') {
+    out.push(o.text);
+    return; // its own `text` is the leaf — don't descend further
+  }
+  for (const key of ['pretext', 'title', 'text', 'value', 'footer'] as const) {
+    if (typeof o[key] === 'string' && (o[key] as string).length > 0) out.push(o[key] as string);
+  }
+  for (const v of Object.values(o)) {
+    if (v && typeof v === 'object') harvestSlackText(v, out);
+  }
+}
 
 /** Slack message ts is "<unixSeconds>.<seq>". Convert to an ISO timestamp. */
 function tsToIso(ts: string): string {

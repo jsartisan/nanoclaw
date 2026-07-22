@@ -27,6 +27,7 @@ import { openInboundDb, openOutboundDb } from './session-manager.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getSession, updateSession } from './db/sessions.js';
 import { GROUPS_DIR } from './config.js';
+import { requestApproval, registerApprovalHandler } from './modules/approvals/index.js';
 
 const envConfig = readEnvFile(['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'REFLECTION_MODEL']);
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || envConfig.ANTHROPIC_API_KEY;
@@ -116,9 +117,30 @@ export async function reflectOnSession(agentGroupId: string, sessionId: string):
     writeAtomic(memoryPath, result.memory_md.trimEnd() + '\n');
   }
 
-  let skillsWritten = 0;
+  // Learned skills are standing instructions auto-discovered by every future
+  // session — and the transcript they're extracted from can contain untrusted
+  // text (webpages, emails, other chat members). Never write them unattended;
+  // route each through the admin approval flow instead.
+  let skillsRequested = 0;
   for (const skill of result.skills) {
-    if (writeSkillFile(agentGroup.folder, skill)) skillsWritten++;
+    if (skillFileExists(agentGroup.folder, skill.name)) continue;
+    await requestApproval({
+      session,
+      agentName: agentGroup.name,
+      action: 'save_learned_skill',
+      payload: { folder: agentGroup.folder, ...skill },
+      title: `Save learned skill "${skill.name}"?`,
+      question: [
+        `Reflection on a ${agentGroup.name} session extracted a reusable procedure:`,
+        '',
+        `**${skill.name}** — ${skill.description}`,
+        '',
+        '```',
+        skill.content.length > 1500 ? skill.content.slice(0, 1500) + '\n…[truncated]' : skill.content,
+        '```',
+      ].join('\n'),
+    }).catch((err) => log.warn('Failed to request skill approval', { name: skill.name, err }));
+    skillsRequested++;
   }
 
   // Advance the watermark to the newest message we just processed.
@@ -128,9 +150,25 @@ export async function reflectOnSession(agentGroupId: string, sessionId: string):
     sessionId,
     userChanged: Boolean(result.user_md),
     memoryChanged: Boolean(result.memory_md),
-    skills: skillsWritten,
+    skillsRequested,
   });
 }
+
+// On approve, actually write the skill file. Registered at module load;
+// src/index.ts imports this module at startup so the handler exists even if
+// the approval is answered after a host restart.
+registerApprovalHandler('save_learned_skill', async ({ payload, notify }) => {
+  const folder = typeof payload.folder === 'string' ? payload.folder : '';
+  const name = typeof payload.name === 'string' ? payload.name : '';
+  const description = typeof payload.description === 'string' ? payload.description : '';
+  const content = typeof payload.content === 'string' ? payload.content : '';
+  if (!folder || !name || !content) {
+    notify(`Learned skill could not be saved: malformed approval payload.`);
+    return;
+  }
+  const written = writeSkillFile(folder, { name, description, content });
+  notify(written ? `Learned skill "${name}" saved.` : `Learned skill "${name}" not saved (already exists or invalid name).`);
+});
 
 interface ConversationSlice {
   text: string;
@@ -293,11 +331,21 @@ function writeAtomic(filePath: string, content: string): void {
   fs.renameSync(tmp, filePath);
 }
 
-function writeSkillFile(agentFolder: string, skill: { name: string; description: string; content: string }): boolean {
-  const name = skill.name
+function sanitizeSkillName(raw: string): string {
+  return raw
     .toLowerCase()
     .replace(/[^a-z0-9._-]/g, '-')
     .slice(0, 64);
+}
+
+function skillFileExists(agentFolder: string, rawName: string): boolean {
+  const name = sanitizeSkillName(rawName);
+  if (!name) return true; // unusable name — treat as "nothing to request"
+  return fs.existsSync(path.join(GROUPS_DIR, agentFolder, 'skills', name, 'SKILL.md'));
+}
+
+function writeSkillFile(agentFolder: string, skill: { name: string; description: string; content: string }): boolean {
+  const name = sanitizeSkillName(skill.name);
   if (!name) return false;
 
   const skillDir = path.join(GROUPS_DIR, agentFolder, 'skills', name);

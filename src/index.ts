@@ -13,6 +13,7 @@ import { runMigrations } from './db/migrations/index.js';
 import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import { getDefaultChannelAccount } from './db/channel-accounts.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
+import { reconcileContainerStates } from './session-manager.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
@@ -53,6 +54,9 @@ import './channels/index.js';
 // Modules barrel — default modules (typing, mount-security) ship here; skills
 // append registry-based modules. Imported for side effects (registrations).
 import './modules/index.js';
+// Side-effect: registers the 'save_learned_skill' approval handler so
+// pending skill approvals can be answered even across a host restart.
+import './reflection.js';
 
 // CLI command barrel — populates the `clawie` registry before the CLI server
 // accepts connections.
@@ -79,6 +83,12 @@ async function main(): Promise<void> {
   // 2. Container runtime
   ensureContainerRuntimeRunning();
   cleanupOrphans();
+  // Stale-state reconcile: cleanupOrphans just killed every surviving
+  // container from the previous run, and the in-memory activeContainers map
+  // starts empty, so any session still marked 'running'/'idle' is orphaned by
+  // a prior crash/restart. Reset them to 'stopped' so the portal badge is
+  // accurate immediately; the sweep re-spawns whatever still has due work.
+  reconcileContainerStates();
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {

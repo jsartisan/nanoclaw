@@ -26,6 +26,7 @@ import {
   getSessionsByAgentGroup,
   getActiveSessions,
   getRunningSessions,
+  resetStaleContainerStatuses,
   updateSession,
   deleteSession,
   createPendingQuestion,
@@ -355,6 +356,19 @@ describe('sessions', () => {
     createSession({ ...sess(), id: 'sess-idle', container_status: 'idle', thread_id: 'thread-1' });
     createSession({ ...sess(), id: 'sess-stopped', container_status: 'stopped', thread_id: 'thread-2' });
     expect(getRunningSessions()).toHaveLength(2);
+  });
+
+  it('should reset stale container statuses to stopped', () => {
+    createSession({ ...sess(), container_status: 'running' });
+    createSession({ ...sess(), id: 'sess-idle', container_status: 'idle', thread_id: 'thread-1' });
+    createSession({ ...sess(), id: 'sess-stopped', container_status: 'stopped', thread_id: 'thread-2' });
+
+    // Only the 'running' + 'idle' rows are stale and should be corrected.
+    expect(resetStaleContainerStatuses()).toBe(2);
+    expect(getRunningSessions()).toHaveLength(0);
+
+    // Idempotent — a second pass corrects nothing.
+    expect(resetStaleContainerStatuses()).toBe(0);
   });
 
   it('should update', () => {

@@ -71,9 +71,24 @@ export function getRunningSessions(): Session[] {
   return getDb().prepare("SELECT * FROM sessions WHERE container_status IN ('running', 'idle')").all() as Session[];
 }
 
+/**
+ * Reset every session's `container_status` to 'stopped'. Used at host startup
+ * to clear rows orphaned by a previous crash/restart: the in-memory
+ * `activeContainers` map is gone and `cleanupOrphans()` has already killed any
+ * surviving containers, so any row still marked 'running'/'idle' is provably
+ * stale. Returns the number of rows corrected. The sweep re-spawns whatever
+ * still has due work.
+ */
+export function resetStaleContainerStatuses(): number {
+  return getDb().prepare("UPDATE sessions SET container_status = 'stopped' WHERE container_status != 'stopped'").run()
+    .changes;
+}
+
 export function updateSession(
   id: string,
-  updates: Partial<Pick<Session, 'status' | 'container_status' | 'last_active' | 'agent_provider' | 'last_reflected_at'>>,
+  updates: Partial<
+    Pick<Session, 'status' | 'container_status' | 'last_active' | 'agent_provider' | 'last_reflected_at'>
+  >,
 ): void {
   const fields: string[] = [];
   const values: Record<string, unknown> = { id };

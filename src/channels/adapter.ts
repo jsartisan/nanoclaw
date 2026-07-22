@@ -94,6 +94,18 @@ export interface InboundMessage {
   isGroup?: boolean;
 }
 
+/**
+ * One prior thread message surfaced to an agent as background context when it
+ * is engaged in a thread. Produced by `ChannelAdapter.fetchThreadContext` and
+ * rendered by the container formatter as a `<thread_context>` block.
+ */
+export interface ThreadContextEntry {
+  sender: string;
+  text: string;
+  /** ISO timestamp of the original message, rendered so the agent can reason about chronology. */
+  time: string;
+}
+
 /** A file attachment to deliver alongside a message. */
 export interface OutboundFile {
   filename: string;
@@ -161,6 +173,24 @@ export interface ChannelAdapter {
    * treats absence as a no-op.
    */
   subscribe?(platformId: string, threadId: string): Promise<void>;
+
+  /**
+   * Fetch the prior messages of the thread an agent is engaged in, so it sees
+   * the surrounding conversation rather than just the triggering message.
+   *
+   * Called by the router on every *engaging* message (whatever the engage mode
+   * — mention, mention-sticky, or pattern — decides woke the agent), so a
+   * re-mention re-syncs anything missed since last time. Driving it from the
+   * router (not the adapter's own event handler) is what makes it
+   * engage-mode-aware: the adapter has no view of wirings, but the router does.
+   *
+   * `excludeMessageId` is the platform id of the triggering message (so it
+   * isn't duplicated — it's already the main message). Implementations should
+   * exclude the bot's own messages and return entries oldest-first, capped to
+   * a sane recent window. Returns [] when there's nothing to add, on error, or
+   * for non-threaded platforms (which omit this method entirely).
+   */
+  fetchThreadContext?(platformId: string, threadId: string, excludeMessageId?: string): Promise<ThreadContextEntry[]>;
 
   /**
    * Open (or fetch) a DM with this user, returning the platform_id of the

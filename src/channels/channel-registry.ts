@@ -9,11 +9,46 @@ import { log } from '../log.js';
 
 const SETUP_RETRY_DELAYS_MS = [2000, 5000, 10000];
 
+/**
+ * Hard ceiling on a single adapter.setup() attempt. A channel whose platform
+ * is unreachable (DNS blackhole, a government-level ban, a dropped route) can
+ * leave setup() hanging indefinitely — the connection neither completes nor
+ * fails fast. Bounding each attempt guarantees the concurrent init in
+ * initChannelAdapters() always settles, so one dead channel can't wedge
+ * startup or starve its siblings.
+ */
+const SETUP_TIMEOUT_MS = 30000;
+
 /** Duck-type check — adapters that throw an Error with `name === 'NetworkError'`
  * (Chat SDK's `@chat-adapter/shared.NetworkError` and similar) get a retry on
  * setup. Avoids depending on `@chat-adapter/shared` at trunk level. */
 function isNetworkError(err: unknown): err is Error {
   return err instanceof Error && err.name === 'NetworkError';
+}
+
+class SetupTimeoutError extends Error {
+  constructor(label: string, ms: number) {
+    super(`channel "${label}" setup timed out after ${ms}ms`);
+    this.name = 'SetupTimeoutError';
+  }
+}
+
+/**
+ * Race a setup promise against a timeout. If the timeout wins we reject, but
+ * the original promise may still settle later (e.g. a retry loop deep inside a
+ * Chat SDK adapter) — attach a no-op catch so that late rejection can't surface
+ * as an unhandledRejection after we've already moved on.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SetupTimeoutError(label, ms)), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  promise.catch(() => {});
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -75,9 +110,12 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
   hostSetupFn = setupFn;
-  for (const [name, registration] of registry) {
-    await startRegistration(name, registration, setupFn);
-  }
+  // Start every registration concurrently rather than awaiting them in series.
+  // A channel whose platform is unreachable (e.g. a banned messaging service)
+  // must never block the channels behind it in the registry from coming online.
+  // startRegistration() swallows its own errors and each setup() is bounded by
+  // SETUP_TIMEOUT_MS, so allSettled is guaranteed to resolve in bounded time.
+  await Promise.allSettled([...registry].map(([name, registration]) => startRegistration(name, registration, setupFn)));
 }
 
 /**
@@ -103,50 +141,82 @@ async function startRegistration(
   }
 
   // A factory may return multiple instances (one bot/app per account).
-  // Set each up independently so one bad token doesn't kill its siblings.
+  // Set each up concurrently: accounts are independent bots/apps, so a slow or
+  // unreachable one (e.g. a banned platform that times out) must not delay its
+  // siblings. With N dead accounts this keeps the registration bounded to a
+  // single SETUP_TIMEOUT_MS window instead of N × the timeout in series.
   const adapters = Array.isArray(produced) ? produced : [produced];
-  const started: ChannelAdapter[] = [];
-  for (const adapter of adapters) {
-    try {
-      const setup = setupFn(adapter);
-      // Transient network failures during adapter init (e.g. Telegram deleteWebhook
-      // hitting a DNS hiccup at boot) would otherwise leave the channel permanently
-      // dead until manual restart. Retry only on NetworkError so misconfigs (bad
-      // tokens, etc.) still fail fast.
-      let attempt = 0;
-      while (true) {
-        try {
-          await adapter.setup(setup);
-          break;
-        } catch (err) {
-          if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
-            const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
-            log.warn('Channel adapter setup failed with network error, retrying', {
-              channel: name,
-              accountId: adapter.accountId,
-              attempt: attempt + 1,
-              delayMs: delay,
-              err: err.message,
-            });
-            await sleep(delay);
-            attempt += 1;
-            continue;
-          }
-          throw err;
+  const started = await Promise.all(adapters.map((adapter) => startOneAdapter(name, adapter, setupFn)));
+  return started.filter((a): a is ChannelAdapter => a !== null);
+}
+
+/**
+ * Set up a single adapter instance. Returns the adapter on success, or null on
+ * failure (logged, never thrown) so one bad token/account doesn't kill its
+ * siblings.
+ */
+async function startOneAdapter(
+  name: string,
+  adapter: ChannelAdapter,
+  setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+): Promise<ChannelAdapter | null> {
+  try {
+    const setup = setupFn(adapter);
+    // Transient network failures during adapter init (e.g. Telegram deleteWebhook
+    // hitting a DNS hiccup at boot) would otherwise leave the channel permanently
+    // dead until manual restart. Retry only on NetworkError so misconfigs (bad
+    // tokens, etc.) still fail fast.
+    let attempt = 0;
+    while (true) {
+      const setupPromise = adapter.setup(setup);
+      try {
+        await withTimeout(setupPromise, SETUP_TIMEOUT_MS, name);
+        break;
+      } catch (err) {
+        // A timed-out setup() keeps running in the background. If it
+        // eventually succeeds, the adapter's socket is live and its inbound
+        // handlers fire — but it was never added to activeAdapters, so
+        // outbound delivery can't find it and reload/shutdown would never
+        // tear it down. Chain a best-effort teardown onto the still-pending
+        // promise so a late success is immediately shut back off.
+        if (err instanceof SetupTimeoutError) {
+          setupPromise
+            .then(() => {
+              log.warn('Channel adapter setup completed after timeout — tearing down zombie', {
+                channel: name,
+                accountId: adapter.accountId,
+              });
+              return adapter.teardown();
+            })
+            .catch(() => {});
         }
+        if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
+          const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
+          log.warn('Channel adapter setup failed with network error, retrying', {
+            channel: name,
+            accountId: adapter.accountId,
+            attempt: attempt + 1,
+            delayMs: delay,
+            err: err.message,
+          });
+          await sleep(delay);
+          attempt += 1;
+          continue;
+        }
+        throw err;
       }
-      activeAdapters.set(adapterKey(adapter.channelType, adapter.accountId), adapter);
-      started.push(adapter);
-      log.info('Channel adapter started', {
-        channel: name,
-        type: adapter.channelType,
-        accountId: adapter.accountId,
-      });
-    } catch (err) {
-      log.error('Failed to start channel adapter', { channel: name, accountId: adapter.accountId, err });
     }
+    activeAdapters.set(adapterKey(adapter.channelType, adapter.accountId), adapter);
+    log.info('Channel adapter started', {
+      channel: name,
+      type: adapter.channelType,
+      accountId: adapter.accountId,
+    });
+    return adapter;
+  } catch (err) {
+    log.error('Failed to start channel adapter', { channel: name, accountId: adapter.accountId, err });
+    return null;
   }
-  return started;
 }
 
 /**

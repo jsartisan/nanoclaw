@@ -35,7 +35,7 @@ import { resolveSession, writeSessionMessage, writeOutboundDirect } from './sess
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
-import type { InboundEvent } from './channels/adapter.js';
+import type { ChannelAdapter, InboundEvent, ThreadContextEntry } from './channels/adapter.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -325,7 +325,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter, true);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -356,7 +356,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter, false);
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -435,15 +435,81 @@ function evaluateEngage(
   }
 }
 
+/**
+ * Backfill the surrounding thread whenever an agent is engaged. Returns the
+ * message content with a `threadContext` field merged in, or the original
+ * content unchanged when there's nothing to add.
+ *
+ * Runs on every *engaging* message (`engaged` = the message woke the agent),
+ * so a re-mention after silence re-syncs anything the agent missed (e.g. a new
+ * alert from another bot that the live inbound path filters out). Gating on
+ * `engaged` keeps this engage-mode-aware: a sticky follow-up that doesn't wake
+ * the agent skips the fetch. The adapter does the platform fetch; the router
+ * decides *when*. Best-effort: failures fall back to the raw content so a Slack
+ * hiccup never blocks routing.
+ *
+ * Resolves the adapter for the *specific account* that received the message:
+ * with multiple bots on one channel type the generic lookup can hand back a
+ * different bot whose token can't see this channel (→ `channel_not_found`).
+ *
+ * Memoized per event: the fan-out loop calls deliverToAgent once per wired
+ * agent, and the surrounding thread is identical for all of them — one Slack
+ * round-trip, not one per agent. WeakMap so the cache dies with the event.
+ */
+const threadContextCache = new WeakMap<InboundEvent, Promise<string>>();
+
+function maybeAttachThreadContext(event: InboundEvent, engaged: boolean): Promise<string> {
+  if (!engaged || event.threadId === null) return Promise.resolve(event.message.content);
+
+  let cached = threadContextCache.get(event);
+  if (!cached) {
+    cached = attachThreadContext(event, event.threadId);
+    threadContextCache.set(event, cached);
+  }
+  return cached;
+}
+
+async function attachThreadContext(event: InboundEvent, threadId: string): Promise<string> {
+  const adapter = getChannelAdapter(event.channelType, event.channelAccount);
+  if (!adapter?.supportsThreads || !adapter.fetchThreadContext) return event.message.content;
+
+  try {
+    const ctx: ThreadContextEntry[] = await adapter.fetchThreadContext(
+      event.platformId,
+      threadId,
+      event.message.id,
+    );
+    if (ctx.length === 0) return event.message.content;
+    const parsed = JSON.parse(event.message.content) as Record<string, unknown>;
+    log.info('Attached thread context', {
+      channelType: event.channelType,
+      channelAccount: event.channelAccount ?? null,
+      threadId,
+      count: ctx.length,
+    });
+    return JSON.stringify({ ...parsed, threadContext: ctx });
+  } catch (err) {
+    log.warn('Thread-context attach failed', {
+      channelType: event.channelType,
+      channelAccount: event.channelAccount ?? null,
+      threadId,
+      err,
+    });
+    return event.message.content;
+  }
+}
+
 async function deliverToAgent(
   agent: MessagingGroupAgent,
   agentGroup: AgentGroup,
   mg: MessagingGroup,
   event: InboundEvent,
   userId: string | null,
-  adapterSupportsThreads: boolean,
+  adapter: ChannelAdapter | undefined,
   wake: boolean,
 ): Promise<void> {
+  const adapterSupportsThreads = adapter?.supportsThreads === true;
+
   // Apply the adapter thread policy: threaded adapter in a group chat →
   // per-thread session regardless of wiring. agent-shared preserved (it's
   // a cross-channel directive the adapter doesn't know about). DMs collapse
@@ -488,6 +554,14 @@ async function deliverToAgent(
     }
   }
 
+  // Whenever this message engages the agent → backfill the surrounding thread
+  // so it reads the full conversation, not just the triggering message. Gated
+  // on `wake` (engage-mode-aware) rather than session creation, so a re-mention
+  // re-syncs anything missed since last time. Driven here (not in the adapter's
+  // event handler) so it fires for every engage_mode — mention, mention-sticky,
+  // and pattern alike.
+  const messageContent = await maybeAttachThreadContext(event, wake);
+
   writeSessionMessage(session.agent_group_id, session.id, {
     id: messageIdForAgent(event.message.id, agent.agent_group_id),
     kind: event.message.kind,
@@ -495,7 +569,7 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
+    content: messageContent,
     trigger: wake ? 1 : 0,
   });
 

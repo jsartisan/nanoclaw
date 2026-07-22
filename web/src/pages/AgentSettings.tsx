@@ -1,35 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from '@tanstack/react-router';
-import {
-  IconBook,
-  IconBrandGithub,
-  IconBrandGmail,
-  IconChartBar,
-  IconBrandSlack,
-  IconBrandTelegram,
-  IconCalendar,
-  IconPlugConnected,
-  IconPuzzle,
-  IconSearch,
-  IconWorld,
-} from '@tabler/icons-react';
 
-import { Badge } from 'ui/components/Badge';
 import { Button } from 'ui/components/Button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from 'ui/components/Card';
+import { Card, CardContent } from 'ui/components/Card';
 import { ConfirmDialog } from 'ui/components/ConfirmDialog';
 import { Label } from 'ui/components/Label';
-import { Modal } from 'ui/components/Modal';
-import { Dialog, DialogDescription, DialogHeader, DialogTitle } from 'ui/components/Dialog';
-import { NativeLink } from 'ui/components/NativeLink';
 import { Select, SelectItem } from 'ui/components/Select';
 import { Skeleton } from 'ui/components/Skeleton';
 import { TextField } from 'ui/components/TextField';
 import { Textarea } from 'ui/components/Textarea';
 import { toast } from 'ui/components/Toast';
 
-import { CommandError, call, custom, list } from '../lib/api';
-import { CHANNEL_CATALOG } from '../lib/channels';
+import { CommandError, call } from '../lib/api';
 import { PageShell } from '../components/PageShell';
 
 interface AgentSettingsData {
@@ -37,67 +19,32 @@ interface AgentSettingsData {
   name: string;
   personality: string;
   model: string | null;
+  effort: string | null;
 }
 
-type EngageMode = 'mention' | 'mention-sticky' | 'pattern';
+// `default` = clear the override (empty value); `custom` reveals a free-text id field.
+// All other ids are the literal model value stored in the container config.
+const MODEL_OPTIONS = [
+  { id: 'default', label: 'Default' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8 — most capable' },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5 — balanced' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 — fastest' },
+  { id: 'custom', label: 'Custom model id…' },
+];
+const MODEL_PRESET_IDS = new Set(['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5-20251001']);
 
-interface ChannelAccount {
-  id: string;
-  channel_type: string;
-  account_id: string;
-  default_agent_group_id: string | null;
-  engage_mode: EngageMode;
-  engage_pattern: string | null;
-}
-
-const ENGAGE_OPTIONS: { id: EngageMode; label: string; hint: string }[] = [
-  { id: 'mention', label: 'Mention only', hint: '@mention to engage. DMs always reply.' },
-  { id: 'mention-sticky', label: 'Mention-sticky', hint: 'Mention once, then keep replying in that thread.' },
-  { id: 'pattern', label: 'Pattern', hint: 'Reply when the message text matches a regex.' },
+const EFFORT_OPTIONS = [
+  { id: 'default', label: 'Default' },
+  { id: 'low', label: 'Low — fastest, cheapest' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'high', label: 'High' },
+  { id: 'xhigh', label: 'Extra high' },
+  { id: 'max', label: 'Max — deepest reasoning' },
 ];
 
-/** Short human label for a connection's current engagement setting. */
-function engageSummary(acc: ChannelAccount): string {
-  if (acc.engage_mode === 'pattern') return `Pattern: ${acc.engage_pattern || '.'}`;
-  return ENGAGE_OPTIONS.find((o) => o.id === acc.engage_mode)?.label ?? 'Mention only';
-}
-
-interface IntegrationEntry {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  auth: { type: 'api_key' | 'none' | 'guided'; env?: string; urlEnv?: string; helpUrl?: string; help?: string };
-  enabled_groups: string[];
-}
-
-const INTEGRATION_ICONS: Record<string, typeof IconPuzzle> = {
-  'brave-search': IconSearch,
-  tavily: IconWorld,
-  firecrawl: IconWorld,
-  context7: IconBook,
-  github: IconBrandGithub,
-  grafana: IconChartBar,
-  gmail: IconBrandGmail,
-  'google-calendar': IconCalendar,
-};
-
-function channelIcon(channelType: string) {
-  if (channelType === 'telegram') return <IconBrandTelegram className="size-5" />;
-  if (channelType === 'slack') return <IconBrandSlack className="size-5" />;
-  return <IconPlugConnected className="size-5" />;
-}
-
-/* Neutral editorial tile — the channel name carries the identity. */
-function channelTile(channelType: string): string {
-  if (channelType === 'telegram' || channelType === 'slack')
-    return 'bg-secondary text-secondary-foreground';
-  return 'bg-primary/8 text-primary';
-}
-
 /**
- * Everything configurable about one agent: profile, the channels it answers
- * on, the abilities (integrations) it has, and the danger zone.
+ * The agent's profile (name, personality, model) and the danger zone.
+ * Channels live under Connections; abilities under Integrations.
  */
 export function AgentSettings() {
   const { groupId } = useParams({ from: '/agents/$groupId/settings' });
@@ -107,43 +54,38 @@ export function AgentSettings() {
   const [name, setName] = useState('');
   const [personality, setPersonality] = useState('');
   const [model, setModel] = useState('');
-  const [connections, setConnections] = useState<ChannelAccount[]>([]);
-  const [integrations, setIntegrations] = useState<IntegrationEntry[]>([]);
+  // Dropdown key: 'default', a preset id, or 'custom' when the id is free-typed.
+  const [modelChoice, setModelChoice] = useState('default');
+  const [effort, setEffort] = useState('');
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [removing, setRemoving] = useState<ChannelAccount | null>(null);
-  const [editingEngage, setEditingEngage] = useState<ChannelAccount | null>(null);
-  const [enabling, setEnabling] = useState<IntegrationEntry | null>(null);
-
-  const refreshWiring = useCallback(async () => {
-    const [accounts, catalog] = await Promise.all([
-      list<ChannelAccount>('channel-accounts').catch(() => [] as ChannelAccount[]),
-      call<IntegrationEntry[]>('integrations-list').catch(() => [] as IntegrationEntry[]),
-    ]);
-    setConnections(accounts.filter((a) => a.default_agent_group_id === groupId));
-    setIntegrations(catalog);
-  }, [groupId]);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([call<AgentSettingsData>('agent-get', { id: groupId }), refreshWiring()])
-      .then(([s]) => {
+    call<AgentSettingsData>('agent-get', { id: groupId })
+      .then((s) => {
         if (cancelled) return;
         setSettings(s);
         setName(s.name);
         setPersonality(s.personality);
-        setModel(s.model ?? '');
+        const m = s.model ?? '';
+        setModel(m);
+        setModelChoice(m === '' ? 'default' : MODEL_PRESET_IDS.has(m) ? m : 'custom');
+        setEffort(s.effort ?? '');
       })
       .catch((err) => toast.error(err instanceof CommandError ? err.message : 'Could not load this agent'));
     return () => {
       cancelled = true;
     };
-  }, [groupId, refreshWiring]);
+  }, [groupId]);
 
   const dirty =
     settings !== null &&
-    (name.trim() !== settings.name || personality.trim() !== settings.personality || model.trim() !== (settings.model ?? ''));
+    (name.trim() !== settings.name ||
+      personality.trim() !== settings.personality ||
+      model.trim() !== (settings.model ?? '') ||
+      effort !== (settings.effort ?? ''));
 
   async function save() {
     if (!settings) return;
@@ -154,8 +96,15 @@ export function AgentSettings() {
         name: name.trim(),
         personality: personality.trim(),
         model: model.trim(),
+        effort,
       });
-      setSettings({ ...settings, name: name.trim(), personality: personality.trim(), model: model.trim() || null });
+      setSettings({
+        ...settings,
+        name: name.trim(),
+        personality: personality.trim(),
+        model: model.trim() || null,
+        effort: effort || null,
+      });
       toast.success(result.restarted > 0 ? 'Saved — your agent restarted with the changes' : 'Saved');
     } catch (err) {
       toast.error(err instanceof CommandError ? err.message : 'Could not save');
@@ -177,18 +126,6 @@ export function AgentSettings() {
     }
   }
 
-  async function disconnect(account: ChannelAccount) {
-    try {
-      await custom('channel-accounts', 'delete', { id: account.id });
-      toast.success('Disconnected');
-      await refreshWiring();
-    } catch (err) {
-      toast.error(err instanceof CommandError ? err.message : 'Failed to disconnect');
-    } finally {
-      setRemoving(null);
-    }
-  }
-
   if (settings === null) {
     return (
       <div className="mx-auto flex w-full max-w-xl flex-col gap-4 p-6" aria-hidden>
@@ -197,8 +134,6 @@ export function AgentSettings() {
       </div>
     );
   }
-
-  const connectedTypes = new Set(connections.map((c) => c.channel_type));
 
   return (
     <PageShell width="narrow" className="flex flex-col gap-6">
@@ -217,107 +152,53 @@ export function AgentSettings() {
             />
           </div>
 
-          <TextField
+          <Select
             label="Model"
-            value={model}
-            onChange={setModel}
-            placeholder="Default"
-            description="Leave empty for the default model. Advanced: a specific model id, e.g. claude-sonnet-4-5."
-          />
+            selectedKey={modelChoice}
+            onSelectionChange={(k) => {
+              const key = String(k);
+              setModelChoice(key);
+              // Preset keys are the model id itself; 'default' clears; 'custom' keeps the typed value.
+              if (key === 'default') setModel('');
+              else if (key !== 'custom') setModel(key);
+            }}
+            description="The model this agent runs on. Leave as Default unless you have a reason to change it."
+          >
+            {MODEL_OPTIONS.map((o) => (
+              <SelectItem key={o.id} id={o.id}>
+                {o.label}
+              </SelectItem>
+            ))}
+          </Select>
+
+          {modelChoice === 'custom' && (
+            <TextField
+              label="Custom model id"
+              value={model}
+              onChange={setModel}
+              placeholder="e.g. claude-sonnet-4-5"
+              description="Any provider-specific model id supported by this agent's provider."
+            />
+          )}
+
+          <Select
+            label="Reasoning effort"
+            selectedKey={effort || 'default'}
+            onSelectionChange={(k) => setEffort(String(k) === 'default' ? '' : String(k))}
+            description="How hard the model thinks before replying. Higher is slower and costs more."
+          >
+            {EFFORT_OPTIONS.map((o) => (
+              <SelectItem key={o.id} id={o.id}>
+                {o.label}
+              </SelectItem>
+            ))}
+          </Select>
 
           <div className="flex justify-end">
             <Button onPress={save} isDisabled={!dirty || saving}>
               {saving ? 'Saving…' : 'Save changes'}
             </Button>
           </div>
-        </CardContent>
-      </Card>
-
-      <Card variant="outline">
-        <CardHeader>
-          <CardTitle className="text-base">Reachable from</CardTitle>
-          <CardDescription>Where this agent answers, besides web chat.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2.5">
-          {connections.map((acc) => (
-            <div key={acc.id} className="flex items-center gap-3">
-              <div
-                className={`relative flex size-9 shrink-0 items-center justify-center rounded-lg ${channelTile(acc.channel_type)}`}
-              >
-                {channelIcon(acc.channel_type)}
-                <span className="border-card bg-success absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full border-2" />
-              </div>
-              <div className="min-w-0 grow">
-                <span className="truncate font-medium capitalize">{acc.channel_type}</span>
-                <div className="text-muted-foreground truncate text-xs">
-                  “{acc.account_id}” · {engageSummary(acc)}
-                </div>
-              </div>
-              <Button variant="outline" size="sm" onPress={() => setEditingEngage(acc)}>
-                Engagement
-              </Button>
-              <Button variant="outline" size="sm" onPress={() => setRemoving(acc)}>
-                Disconnect
-              </Button>
-            </div>
-          ))}
-          <div className="flex flex-wrap gap-2 pt-1">
-            {CHANNEL_CATALOG.filter((ch) => !connectedTypes.has(ch.id)).map((ch) => (
-              <Button
-                key={ch.id}
-                variant="outline"
-                size="sm"
-                onPress={() =>
-                  navigate({
-                    to: '/agents/$groupId/connect',
-                    params: { groupId },
-                    search: { channel: ch.id },
-                  })
-                }
-              >
-                {channelIcon(ch.id)} Connect {ch.name}
-              </Button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card variant="outline">
-        <CardHeader>
-          <CardTitle className="text-base">Abilities</CardTitle>
-          <CardDescription>Give this agent new abilities — search, email, docs, and more.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          {integrations.map((entry) => {
-            const EntryIcon = INTEGRATION_ICONS[entry.id] ?? IconPuzzle;
-            const enabledHere = entry.enabled_groups.includes(groupId);
-            const guided = entry.auth.type === 'guided';
-            return (
-              <div key={entry.id} className="flex items-center gap-3">
-                <div className="bg-muted text-foreground/80 border-border flex size-9 shrink-0 items-center justify-center rounded-lg border">
-                  <EntryIcon className="size-4.5" stroke={1.75} />
-                </div>
-                <div className="min-w-0 grow">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate font-medium">{entry.name}</span>
-                    {enabledHere && (
-                      <Badge variant="secondary">
-                        <span className="bg-success mr-1 inline-block size-1.5 rounded-full" /> on
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="text-muted-foreground truncate text-xs">
-                    {guided ? entry.auth.help : entry.description}
-                  </div>
-                </div>
-                {!guided && (
-                  <Button variant="outline" size="sm" onPress={() => setEnabling(entry)}>
-                    {enabledHere ? 'Manage' : 'Enable'}
-                  </Button>
-                )}
-              </div>
-            );
-          })}
         </CardContent>
       </Card>
 
@@ -344,213 +225,6 @@ export function AgentSettings() {
           onConfirm={() => void deleteAgent()}
         />
       )}
-
-      {removing && (
-        <ConfirmDialog
-          isOpen
-          onOpenChange={(open) => !open && setRemoving(null)}
-          title={`Disconnect ${removing.channel_type}?`}
-          description="The bot goes offline immediately. Your chat history stays."
-          confirmLabel="Disconnect"
-          onConfirm={() => void disconnect(removing)}
-        />
-      )}
-
-      {editingEngage && (
-        <EngagementDialog
-          account={editingEngage}
-          onClose={() => setEditingEngage(null)}
-          onSaved={() => {
-            setEditingEngage(null);
-            void refreshWiring();
-          }}
-        />
-      )}
-
-      {enabling && (
-        <IntegrationDialog
-          entry={enabling}
-          groupId={groupId}
-          onClose={() => setEnabling(null)}
-          onChanged={() => {
-            setEnabling(null);
-            void refreshWiring();
-          }}
-        />
-      )}
     </PageShell>
-  );
-}
-
-function EngagementDialog({
-  account,
-  onClose,
-  onSaved,
-}: {
-  account: ChannelAccount;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [mode, setMode] = useState<EngageMode>(account.engage_mode ?? 'mention');
-  const [pattern, setPattern] = useState(account.engage_pattern ?? '');
-  const [pending, setPending] = useState(false);
-
-  async function save() {
-    if (mode === 'pattern' && !pattern.trim()) {
-      return toast.error('Enter a pattern, or use “.” to reply to everything');
-    }
-    setPending(true);
-    try {
-      await custom('channel-accounts', 'set-engagement', {
-        id: account.id,
-        engage_mode: mode,
-        engage_pattern: mode === 'pattern' ? pattern.trim() : '',
-      });
-      toast.success('Saved');
-      onSaved();
-    } catch (err) {
-      toast.error(err instanceof CommandError ? err.message : 'Could not save');
-      setPending(false);
-    }
-  }
-
-  return (
-    <Modal isOpen onOpenChange={(open) => !open && onClose()}>
-      <Dialog className="w-[26rem] max-w-full">
-        <DialogHeader>
-          <DialogTitle>When should this agent reply?</DialogTitle>
-          <DialogDescription slot="description">
-            Applies to {account.channel_type} channels and groups. Direct messages always get a reply.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="mt-4 flex flex-col gap-4">
-          <Select
-            label="Engagement"
-            selectedKey={mode}
-            onSelectionChange={(k) => setMode(k as EngageMode)}
-            description={ENGAGE_OPTIONS.find((o) => o.id === mode)?.hint}
-          >
-            {ENGAGE_OPTIONS.map((o) => (
-              <SelectItem key={o.id} id={o.id}>
-                {o.label}
-              </SelectItem>
-            ))}
-          </Select>
-
-          {mode === 'pattern' && (
-            <TextField
-              label="Pattern"
-              value={pattern}
-              onChange={setPattern}
-              placeholder="e.g. (?i)deploy|ship   ·   . matches everything"
-              description="Regular expression matched against the message text."
-            />
-          )}
-        </div>
-
-        <div className="mt-6 flex justify-end gap-2">
-          <Button variant="outline" onPress={onClose}>
-            Cancel
-          </Button>
-          <Button isDisabled={pending} onPress={() => void save()}>
-            {pending ? 'Saving…' : 'Save'}
-          </Button>
-        </div>
-      </Dialog>
-    </Modal>
-  );
-}
-
-function IntegrationDialog({
-  entry,
-  groupId,
-  onClose,
-  onChanged,
-}: {
-  entry: IntegrationEntry;
-  groupId: string;
-  onClose: () => void;
-  onChanged: () => void;
-}) {
-  const [key, setKey] = useState('');
-  const [url, setUrl] = useState('');
-  const [pending, setPending] = useState(false);
-
-  const enabledHere = entry.enabled_groups.includes(groupId);
-  const needsKey = entry.auth.type === 'api_key';
-  const needsUrl = !!entry.auth.urlEnv;
-
-  async function run(action: 'enable' | 'disable') {
-    if (action === 'enable' && needsKey && !key.trim()) return toast.error('Paste the API key first');
-    if (action === 'enable' && needsUrl && !url.trim()) return toast.error('Enter the instance URL first');
-    setPending(true);
-    try {
-      if (action === 'enable') {
-        await call('integrations-enable', { id: entry.id, group: groupId, key: key.trim(), url: url.trim() });
-        toast.success(`${entry.name} is being added — your agent will have it in a few minutes`);
-      } else {
-        await call('integrations-disable', { id: entry.id, group: groupId });
-        toast.success(`${entry.name} disabled`);
-      }
-      onChanged();
-    } catch (err) {
-      toast.error(err instanceof CommandError ? err.message : 'Something went wrong');
-      setPending(false);
-    }
-  }
-
-  return (
-    <Modal isOpen onOpenChange={(open) => !open && onClose()}>
-      <Dialog className="w-[26rem] max-w-full">
-        <DialogHeader>
-          <DialogTitle>{entry.name}</DialogTitle>
-          <DialogDescription slot="description">{entry.description}</DialogDescription>
-        </DialogHeader>
-
-        {needsKey && !enabledHere && (
-          <div className="mt-4 flex flex-col gap-3">
-            {needsUrl && (
-              <TextField
-                label="Instance URL"
-                type="url"
-                placeholder="https://grafana.example.com"
-                value={url}
-                onChange={setUrl}
-              />
-            )}
-            <div className="flex flex-col gap-1.5">
-              <TextField
-                label="API key"
-                type="password"
-                value={key}
-                onChange={setKey}
-                description={entry.auth.help}
-              />
-              {entry.auth.helpUrl && (
-                <NativeLink href={entry.auth.helpUrl} target="_blank" rel="noopener noreferrer" className="text-xs">
-                  Get a key →
-                </NativeLink>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div className="mt-6 flex justify-end gap-2">
-          <Button variant="outline" onPress={onClose}>
-            Cancel
-          </Button>
-          {enabledHere ? (
-            <Button variant="destructive" isDisabled={pending} onPress={() => void run('disable')}>
-              {pending ? 'Disabling…' : 'Disable'}
-            </Button>
-          ) : (
-            <Button isDisabled={pending} onPress={() => void run('enable')}>
-              {pending ? 'Enabling…' : 'Enable'}
-            </Button>
-          )}
-        </div>
-      </Dialog>
-    </Modal>
   );
 }

@@ -25,7 +25,7 @@ const messageContentVariants = tv({
     variant: {
       contained: [
         'max-w-[80%] px-4 py-3',
-        'group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground',
+        'group-[.is-user]:bg-secondary group-[.is-user]:text-foreground',
         'group-[.is-assistant]:w-full group-[.is-assistant]:max-w-full',
       ],
       flat: [

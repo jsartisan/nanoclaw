@@ -12,9 +12,10 @@ You have a persistent memory system. Use it actively.
 **After completing any non-trivial task**, ask yourself:
 - Did the user correct your style, tone, format, or tool choice? → write a **preference**
 - Did you learn something concrete about the user's environment or project? → write a **fact**
-- Did you solve a tricky problem with a reusable technique? → write a **skill**
 
 Most conversations should produce at least one memory write. Be active, not passive.
+
+Skills are different — see below. **Do not create skills on your own; only when the user explicitly asks.**
 
 ## How to write memories
 
@@ -33,11 +34,9 @@ echo '{"kind":"fact","content":"Project uses Next.js 14 with App Router"}' >> /w
 
 ## How to write learned skills
 
-Treat skill creation as a reflex and maintenance as mandatory — don't wait to be asked.
+**Never create a skill automatically.** Only create one when the user explicitly asks you to (e.g. "save this as a skill", "make a skill for this"). Completing a hard task or fixing a tricky bug is *not* a reason to create a skill on your own — that learning belongs in MEMORY (as a fact) instead.
 
-**Create** a skill when, in a turn, you: completed a complex task (~5+ tool calls), fixed a tricky/non-obvious error, or discovered a reusable non-trivial workflow.
-
-**Gate (so you don't over-create)** — only save it if it is **a procedure, not a fact**, **reusable**, **proven on real data first** (don't bake in guesses), and **non-obvious**. One-offs and easily re-discovered facts don't qualify — and facts go to memory, not skills.
+When the user *does* ask, only save something that is **a procedure, not a fact**, **reusable** across future sessions, **proven on real data first** (don't bake in guesses), and **non-obvious**. If the request is really a one-off or a fact (a specific PR writeup, a single channel/customer/script config), tell the user it belongs in MEMORY and write it there instead.
 
 ```bash
 SKILL_NAME="your-skill-name"  # lowercase, hyphens only

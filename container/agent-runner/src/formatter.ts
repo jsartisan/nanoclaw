@@ -172,12 +172,13 @@ function formatSingleChat(msg: MessageInRow): string {
   const text = content.text || '';
   const idAttr = msg.seq != null ? ` id="${msg.seq}"` : '';
   const replyAttr = content.replyTo?.id ? ` reply_to="${escapeXml(String(content.replyTo.id))}"` : '';
+  const threadContextPrefix = formatThreadContext(content.threadContext);
   const replyPrefix = formatReplyContext(content.replyTo);
   const attachmentsSuffix = formatAttachments(content.attachments);
 
   const fromAttr = originAttr(msg);
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${attachmentsSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${threadContextPrefix}${replyPrefix}${escapeXml(text)}${attachmentsSuffix}</message>`;
 }
 
 /**
@@ -236,6 +237,29 @@ function formatReplyContext(replyTo: any): string {
   const text = replyTo.text;
   if (!sender || !text) return '';
   return `\n  <quoted_message from="${escapeXml(sender)}">${escapeXml(text)}</quoted_message>\n`;
+}
+
+/**
+ * Render prior thread messages the bot was pulled into.
+ *
+ * Some adapters (e.g. Slack) attach a `threadContext` array whenever the agent
+ * is engaged mid-thread: the surrounding messages it never received live
+ * (other people's replies, another bot's alert). We render them as a leading
+ * `<thread_context>` block so the agent reads them as background — distinct
+ * from the actual message it should respond to (which follows outside the
+ * block). Each entry carries an optional `time` so the agent can place it
+ * chronologically.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function formatThreadContext(entries: any[] | undefined): string {
+  if (!Array.isArray(entries) || entries.length === 0) return '';
+  const lines = entries.map((e) => {
+    const sender = escapeXml(String(e?.sender ?? 'Unknown'));
+    const body = escapeXml(String(e?.text ?? ''));
+    const time = e?.time ? ` time="${escapeXml(String(e.time))}"` : '';
+    return `  <msg from="${sender}"${time}>${body}</msg>`;
+  });
+  return `\n<thread_context>\n${lines.join('\n')}\n</thread_context>\n`;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

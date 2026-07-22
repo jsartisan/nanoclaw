@@ -56,6 +56,7 @@ register({
       created_at: group.created_at,
       personality: readPersonality(group.folder),
       model: config?.model ?? null,
+      effort: config?.effort ?? null,
       provider: config?.provider ?? group.agent_provider ?? null,
     };
   },
@@ -64,7 +65,7 @@ register({
 register({
   name: 'agent-update',
   description:
-    'Update agent settings and restart its containers so changes apply immediately. Use --id <agent-group-id> [--name <text>] [--personality <text>] [--model <model-id>].',
+    'Update agent settings and restart its containers so changes apply immediately. Use --id <agent-group-id> [--name <text>] [--personality <text>] [--model <model-id>] [--effort low|medium|high|xhigh|max].',
   access: 'approval',
   parseArgs: (raw) => raw,
   handler: async (args: Record<string, unknown>, ctx) => {
@@ -98,6 +99,21 @@ register({
         // Empty string clears the override back to the provider default.
         updateContainerConfigScalars(id, { model: next });
         changed.push('model');
+      }
+    }
+
+    if (typeof args.effort === 'string') {
+      const config = getContainerConfig(id);
+      const raw = args.effort.trim();
+      const VALID = ['low', 'medium', 'high', 'xhigh', 'max'];
+      if (raw && !VALID.includes(raw)) {
+        throw new Error(`invalid effort: ${raw} (expected one of ${VALID.join(', ')})`);
+      }
+      const next = raw || null;
+      if (config && next !== config.effort) {
+        // Empty string clears the override back to the provider default.
+        updateContainerConfigScalars(id, { effort: next });
+        changed.push('effort');
       }
     }
 

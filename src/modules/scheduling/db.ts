@@ -35,22 +35,32 @@ export function insertTask(
   });
 }
 
-export function cancelTask(db: Database.Database, taskId: string): void {
-  db.prepare(
-    "UPDATE messages_in SET status = 'completed', recurrence = NULL WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status IN ('pending', 'paused')",
-  ).run(taskId, taskId);
+// cancel/pause/resume return the number of rows touched so callers can tell
+// whether the task actually lived in this DB. A task belongs to exactly one
+// session's inbound.db within an agent group, so callers fan these out across
+// every session (see actions.ts) and use the count to detect a no-match.
+export function cancelTask(db: Database.Database, taskId: string): number {
+  return db
+    .prepare(
+      "UPDATE messages_in SET status = 'completed', recurrence = NULL WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status IN ('pending', 'paused')",
+    )
+    .run(taskId, taskId).changes;
 }
 
-export function pauseTask(db: Database.Database, taskId: string): void {
-  db.prepare(
-    "UPDATE messages_in SET status = 'paused' WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status = 'pending'",
-  ).run(taskId, taskId);
+export function pauseTask(db: Database.Database, taskId: string): number {
+  return db
+    .prepare(
+      "UPDATE messages_in SET status = 'paused' WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status = 'pending'",
+    )
+    .run(taskId, taskId).changes;
 }
 
-export function resumeTask(db: Database.Database, taskId: string): void {
-  db.prepare(
-    "UPDATE messages_in SET status = 'pending' WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status = 'paused'",
-  ).run(taskId, taskId);
+export function resumeTask(db: Database.Database, taskId: string): number {
+  return db
+    .prepare(
+      "UPDATE messages_in SET status = 'pending' WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status = 'paused'",
+    )
+    .run(taskId, taskId).changes;
 }
 
 export interface TaskUpdate {

@@ -90,6 +90,55 @@ describe('multi-message chat batches', () => {
   });
 });
 
+describe('thread_context rendering', () => {
+  it('renders a <thread_context> block before the message body', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'hey @bot what do you think?',
+      threadContext: [
+        { sender: 'Bob', text: 'We should ship Friday' },
+        { sender: 'Carol', text: 'Agreed, after QA' },
+      ],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<thread_context>');
+    expect(result).toContain('<msg from="Bob">We should ship Friday</msg>');
+    expect(result).toContain('<msg from="Carol">Agreed, after QA</msg>');
+    // Context precedes the actual message text inside the <message> block.
+    const ctxIdx = result.indexOf('<thread_context>');
+    const bodyIdx = result.indexOf('hey @bot what do you think?');
+    expect(ctxIdx).toBeGreaterThanOrEqual(0);
+    expect(bodyIdx).toBeGreaterThan(ctxIdx);
+  });
+
+  it('omits the block when threadContext is absent or empty', () => {
+    insertMessage('m1', 'chat', { sender: 'Alice', text: 'no context', threadContext: [] });
+    insertMessage('m2', 'chat', { sender: 'Bob', text: 'also none' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).not.toContain('thread_context');
+  });
+
+  it('renders the time attribute when an entry carries one', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'reply',
+      threadContext: [{ sender: 'Bob', text: 'shipped', time: '2026-06-18T10:00:00.000Z' }],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<msg from="Bob" time="2026-06-18T10:00:00.000Z">shipped</msg>');
+  });
+
+  it('XML-escapes thread context entries', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'reply',
+      threadContext: [{ sender: 'A & B', text: '<script>alert("xss")</script>' }],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<msg from="A &amp; B">&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;</msg>');
+  });
+});
+
 describe('timestamp formatting', () => {
   it('renders time via formatLocalTime (user TZ)', () => {
     // 2026-06-15T12:00:00Z — timezone-agnostic assertions (year is stable)

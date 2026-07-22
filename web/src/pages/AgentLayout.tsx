@@ -17,6 +17,7 @@ const TABS = [
   { to: '/agents/$groupId/chat', label: 'Chat' },
   { to: '/agents/$groupId/routines', label: 'Routines' },
   { to: '/agents/$groupId/approvals', label: 'Approvals' },
+  { to: '/agents/$groupId/connections', label: 'Connections' },
   { to: '/agents/$groupId/settings', label: 'Settings' },
 ] as const;
 

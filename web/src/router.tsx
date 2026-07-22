@@ -8,6 +8,7 @@ import {
 
 import { AppShell } from './components/AppShell';
 import { Agents } from './pages/Agents';
+import { AgentConnections } from './pages/AgentConnections';
 import { AgentLayout } from './pages/AgentLayout';
 import { AgentSettings } from './pages/AgentSettings';
 import { Approvals } from './pages/Approvals';
@@ -44,6 +45,20 @@ const agentIndexRoute = createRoute({
 const agentChatRoute = createRoute({ getParentRoute: () => agentRoute, path: 'chat', component: Chat });
 const agentRoutinesRoute = createRoute({ getParentRoute: () => agentRoute, path: 'routines', component: Routines });
 const agentApprovalsRoute = createRoute({ getParentRoute: () => agentRoute, path: 'approvals', component: Approvals });
+const agentConnectionsRoute = createRoute({
+  getParentRoute: () => agentRoute,
+  path: 'connections',
+  component: AgentConnections,
+});
+// Integrations were merged into the Connections tab; keep the path as a
+// redirect so existing links and bookmarks still resolve.
+const agentIntegrationsRoute = createRoute({
+  getParentRoute: () => agentRoute,
+  path: 'integrations',
+  beforeLoad: ({ params }) => {
+    throw redirect({ to: '/agents/$groupId/connections', params, replace: true });
+  },
+});
 const agentSettingsRoute = createRoute({ getParentRoute: () => agentRoute, path: 'settings', component: AgentSettings });
 const agentConnectRoute = createRoute({
   getParentRoute: () => agentRoute,
@@ -84,6 +99,8 @@ const routeTree = rootRoute.addChildren([
     agentChatRoute,
     agentRoutinesRoute,
     agentApprovalsRoute,
+    agentConnectionsRoute,
+    agentIntegrationsRoute,
     agentSettingsRoute,
     agentConnectRoute,
   ]),

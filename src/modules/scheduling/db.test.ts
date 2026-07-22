@@ -113,10 +113,24 @@ describe('cancelTask / pauseTask / resumeTask series matching', () => {
     const db = freshDb();
     seedRecurringChain(db);
 
-    pauseTask(db, 'task-orig');
+    const touched = pauseTask(db, 'task-orig');
 
+    expect(touched).toBe(1);
     const followUp = db.prepare("SELECT status FROM messages_in WHERE id = 'task-next'").get() as { status: string };
     expect(followUp.status).toBe('paused');
+    db.close();
+  });
+
+  it('returns 0 rows touched when the task lives in another session DB', () => {
+    // Mirrors the cross-session no-op the fan-out in actions.ts guards against:
+    // pausing an id that exists in no row here must report a miss, not silently
+    // succeed.
+    const db = freshDb();
+    seedRecurringChain(db);
+
+    expect(pauseTask(db, 'task-from-another-session')).toBe(0);
+    expect(resumeTask(db, 'task-from-another-session')).toBe(0);
+    expect(cancelTask(db, 'task-from-another-session')).toBe(0);
     db.close();
   });
 

@@ -179,7 +179,7 @@ function cmdStart() {
   setupTmuxBindings();
 
   createWindow(SESSION_NAME, "host", "pnpm run dev", root);
-  createWindow(SESSION_NAME, "web", "bun run dev", webDir);
+  createWindow(SESSION_NAME, "web", "pnpm run dev", webDir);
 
   tmux(["select-window", "-t", `${SESSION_NAME}:main`]);
 

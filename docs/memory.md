@@ -151,9 +151,11 @@ vector database needed.
 
 This is the crux of the hybrid design. Three guarantees:
 
-1. **Never simultaneous.** The host pass only runs when the container is stopped
-   (`host-sweep.ts` gates on `!alive`). The agent only writes while its container
-   is alive. They don't overlap in time.
+1. **Never simultaneous.** The host pass only runs when **every container in the
+   agent group** is stopped (`host-sweep.ts` gates on `!alive` for the session
+   *and* no sibling session's container running — the memory files are per-group,
+   so a live sibling could otherwise write them mid-merge). The agent only writes
+   while its container is alive. They don't overlap in time.
 
 2. **The host is a reconciler, not a re-author.** It merges new facts *into*
    whatever is already in the file and edits in place. If the agent already wrote
@@ -186,6 +188,15 @@ externally verified** — the tool actually ran, the test passed, or the user
 confirmed it worked. We do **not** auto-save "this looks reusable" guesses,
 because the research is clear that saving unverified self-generated content makes
 agents worse over time, not better.
+
+**And skills are never written unattended.** The reflection LLM reads raw
+transcript text, which can contain untrusted content (webpages the agent quoted,
+emails, other chat members) — a prompt-injection path that would otherwise turn
+one hostile message into a permanent standing instruction. So the reflection
+pass only *proposes* a skill: it goes through the standard admin approval flow
+(`requestApproval`, action `save_learned_skill`), and the file is written only
+when an admin approves the card. Memory-file merges (`USER.md`/`MEMORY.md`)
+remain unattended — they're inert, visible text, not auto-followed instructions.
 
 This is a tightening of today's behavior, where the reflection pass writes
 skills from any pattern the model thinks is reusable.

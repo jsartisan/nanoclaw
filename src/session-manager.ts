@@ -24,6 +24,7 @@ import {
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
+  resetStaleContainerStatuses,
   updateSession,
 } from './db/sessions.js';
 import {
@@ -540,4 +541,26 @@ export function markContainerIdle(sessionId: string): void {
 /** Mark a container as stopped for a session. */
 export function markContainerStopped(sessionId: string): void {
   updateSession(sessionId, { container_status: 'stopped' });
+}
+
+/**
+ * Reconcile session container state at host startup.
+ *
+ * `container_status` is only flipped back to 'stopped' by a tracked
+ * container's process `close` handler (see container-runner.ts). When the host
+ * crashes or restarts, that handler never fires and the in-memory
+ * `activeContainers` map is lost, so rows are left frozen at 'running'/'idle'.
+ * Combined with `cleanupOrphans()` — which has already stopped every surviving
+ * container from the previous run by the time we get here — any non-'stopped'
+ * row is provably stale. Reset them all; the sweep re-spawns whatever still has
+ * due work.
+ *
+ * Call AFTER `cleanupOrphans()` so we never reset a row for a container that is
+ * still legitimately alive.
+ */
+export function reconcileContainerStates(): void {
+  const corrected = resetStaleContainerStatuses();
+  if (corrected > 0) {
+    log.info('Reconciled stale session container states', { corrected });
+  }
 }

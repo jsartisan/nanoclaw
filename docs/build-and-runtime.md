@@ -18,12 +18,12 @@ Host and container each have their own package tree:
   bun.lock                    agent-runner runtime deps (Claude Agent SDK, MCP SDK, zod, etc.)
   package.json                @types/bun, typescript devDeps for type-checking
 
-/web/                         Bun + Vite (admin UI SPA)
-  bun.lock                    web deps (TanStack Router, React 19, Tailwind v4, react-aria-components)
-  package.json                vendored UI primitives' deps + Vite toolchain
+/web/                         Vite (admin UI SPA) — pnpm workspace member
+  package.json                web deps (TanStack Router, React 19, Tailwind v4, react-aria-components) + Vite toolchain
+  (no own lockfile)           resolved through the root pnpm-lock.yaml
 ```
 
-The `web/` tree is the portal (user-facing web UI) — a TanStack Router SPA that talks to the host's portal server (`src/cli/http-server.ts`, a loopback-only JSON API on `:4100`, bearer-token + Origin-validated via `src/cli/portal-auth.ts`). Like `container/agent-runner/`, it is a separate Bun package tree, isolated from the host's pnpm + `minimumReleaseAge` policy. The host's `tsconfig.json` does not include it. Run `task dev` to start the host and the web dev server together.
+The `web/` tree is the portal (user-facing web UI) — a TanStack Router SPA that talks to the host's portal server (`src/cli/http-server.ts`, a loopback-only JSON API on `:4100`, bearer-token + Origin-validated via `src/cli/portal-auth.ts`). It is a **pnpm workspace member** (listed under `packages:` in `pnpm-workspace.yaml`), so its deps install from the root `pnpm install` and are governed by the same `minimumReleaseAge` policy as the host. The host's `tsconfig.json` does not include it (it keeps its own `web/tsconfig.json`). Run `task dev` to start the host and the web dev server together. (`container/agent-runner/` stays a separate Bun tree — it is deliberately *not* a workspace member.)
 
 The container image also has pnpm + Node inside for global CLIs (`@anthropic-ai/claude-code`, `agent-browser`, `vercel`). Those are Node binaries the agent invokes at runtime, not library deps. Keeping them on pnpm preserves the supply-chain policy for CLI versions.
 
@@ -31,9 +31,8 @@ The container image also has pnpm + Node inside for global CLIs (`@anthropic-ai/
 
 | Tree | Lockfile | Manager | Regenerate after dep change |
 |------|----------|---------|----------------------------|
-| Host | `pnpm-lock.yaml` | pnpm 10 | `pnpm install` |
+| Host + admin web UI | `pnpm-lock.yaml` | pnpm 10 | `pnpm install` (root — covers `web/`) |
 | Agent-runner | `container/agent-runner/bun.lock` | Bun 1.3+ | `cd container/agent-runner && bun install` |
-| Admin web UI | `web/bun.lock` | Bun 1.3+ | `cd web && bun install` |
 
 Both are committed. CI and the Dockerfile run `--frozen-lockfile` variants — any drift between `package.json` and lockfile fails the build.
 
@@ -69,7 +68,7 @@ Both paths end with Bun running the same source file from `/app/src/index.ts`.
 3. `pnpm run format:check`
 4. `pnpm exec tsc --noEmit` (host typecheck)
 5. `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` (container typecheck)
-6. `bun run typecheck` + `bun run build` in `web/` (admin UI typecheck + build)
+6. `pnpm run typecheck` + `pnpm run build` in `web/` (admin UI typecheck + build)
 7. `pnpm exec vitest run` (host tests)
 8. `bun test` in `container/agent-runner/` (container tests)
 

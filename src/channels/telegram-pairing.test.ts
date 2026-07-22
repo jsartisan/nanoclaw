@@ -71,9 +71,12 @@ describe('createPairing', () => {
   });
 
   it('does not collide with active codes', async () => {
+    // Distinct intents so every pairing stays pending: same-intent creates
+    // supersede the previous one, and the collision guard only applies to
+    // codes that are still active (a superseded code may legally repeat).
     const codes = new Set<string>();
     for (let i = 0; i < 20; i++) {
-      const r = await createPairing('main');
+      const r = await createPairing({ kind: 'wire-to', folder: `folder-${i}` });
       expect(codes.has(r.code)).toBe(false);
       codes.add(r.code);
     }
