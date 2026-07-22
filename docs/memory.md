@@ -252,8 +252,18 @@ Small and contained:
 - **Watermark home:** `last_reflected_at` column on the central `sessions` table
   (host-owned — respects the one-writer-per-file rule, unlike the
   container-owned `outbound.db` `session_state`).
-- **Budget:** soft instruction in the prompt + agent CLAUDE.md. Revisit with a
-  hard cap if files bloat.
+- **Budget:** enforced in layers (the original soft-instruction-only approach
+  let files grow to 5-6x budget). (1) Both prompts state that staying under
+  budget outranks preserving detail, with concrete evict examples (merged PRs,
+  dated snapshots, status flags). (2) The reflection call is handed each file's
+  *measured* size vs budget — models can't count their own characters. (3) Code
+  backstop: any file still over budget × 1.25 after the merge — including a
+  file the merge didn't change — gets one forced consolidation call
+  (`enforceBudget` in `reflection.ts`) before the atomic write. The
+  didn't-change leg means files that bloated before enforcement existed shrink
+  automatically on the next reflection after session activity. If consolidation
+  fails or doesn't help we write the merged content anyway (losing a session's
+  facts is worse) and log a warning.
 - **Model:** Haiku default, Sonnet via `REFLECTION_MODEL` when a capable key
   exists (see Write path 2).
 

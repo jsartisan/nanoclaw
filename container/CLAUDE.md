@@ -21,9 +21,9 @@ You have two memory files in your workspace, both loaded into your context autom
 - You learn a durable fact about their environment/project → `MEMORY.md`
 - You discover a convention or quirk that will matter again
 
-**When NOT to write:** one-off task state, todos for the current task, raw data dumps, or things easily re-discovered.
+**When NOT to write:** one-off task state, todos for the current task, raw data dumps, or things easily re-discovered. The test for every line: *will this change my behavior in a future, unrelated session?* Completed work (a merged PR, a shipped fix), dated snapshots ("user count: 53 on Jun 17"), and status flags ("in progress", "pending") all fail that test — keep the distilled lesson, drop the event.
 
-**Keep them small.** These files cost tokens on every turn. `USER.md` should stay short (~a dozen lines); `MEMORY.md` modest. When a file gets long, *consolidate* — merge overlapping lines, drop stale ones — rather than appending forever. If a new fact contradicts an old line, replace the old line; latest truth wins.
+**Keep them small — budgets, not vibes.** These files cost tokens on every turn. `USER.md` must stay under ~2,000 chars (~a dozen lines); `MEMORY.md` under ~3,200 chars. Staying under budget outranks preserving detail: when a file nears its budget, *consolidate* — merge overlapping lines, drop stale ones, move anything bulky to `memory/*.md` with a one-line pointer (see below) — rather than appending forever. If a new fact contradicts an old line, replace the old line; latest truth wins.
 
 A host process also tidies these files after each session, so don't worry about perfect formatting — just capture the substance.
 
