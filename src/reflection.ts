@@ -16,17 +16,24 @@
  * Verified, reusable procedures are saved as skills — but only when the
  * transcript shows the procedure actually ran / was confirmed (Voyager rule).
  *
- * Requires ANTHROPIC_API_KEY in .env or environment.
+ * API routing: prefers the OneCLI gateway (HTTPS proxy that injects the vault's
+ * Anthropic credential on the wire — same mechanism agent containers use),
+ * which unlocks Sonnet as the reflection model. Falls back to a direct call
+ * with ANTHROPIC_API_KEY (Haiku — the Claude Code OAuth token tier) when the
+ * gateway is unreachable or the proxied call fails.
  */
 import fs from 'fs';
 import path from 'path';
+
+import { OneCLI } from '@onecli-sh/sdk';
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
 
 import { readEnvFile } from './env.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb } from './session-manager.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getSession, updateSession } from './db/sessions.js';
-import { GROUPS_DIR } from './config.js';
+import { GROUPS_DIR, ONECLI_API_KEY, ONECLI_URL } from './config.js';
 import { requestApproval, registerApprovalHandler } from './modules/approvals/index.js';
 
 const envConfig = readEnvFile(['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'REFLECTION_MODEL']);
@@ -36,13 +43,15 @@ const ANTHROPIC_BASE_URL =
 
 // Model for the reflection pass. Sonnet is the better choice on quality grounds
 // — reflection's mistakes are persistent (written to disk, loaded into every
-// future session) and the person-specific vs shared-memory privacy split is
-// subtle judgment — but the default Claude Code OAuth token only has working
-// Haiku access via the direct Messages API (Sonnet 429s on that token tier).
-// So default to Haiku, which the standard credential supports, and let installs
-// with a Sonnet-capable key (a real sk-ant-api… key, or one injected via the
-// OneCLI gateway) opt in with REFLECTION_MODEL=claude-sonnet-4-6.
-const REFLECTION_MODEL = process.env.REFLECTION_MODEL || envConfig.REFLECTION_MODEL || 'claude-haiku-4-5-20251001';
+// future session) and the keep-vs-evict judgment is subtle — but the default
+// Claude Code OAuth token only has working Haiku access via the direct
+// Messages API (Sonnet 429s on that token tier). So the model follows the
+// route: Sonnet through the OneCLI gateway (the vault's Anthropic credential
+// is injected on the wire), Haiku on the direct-key fallback. Setting
+// REFLECTION_MODEL overrides both routes.
+const REFLECTION_MODEL_OVERRIDE = process.env.REFLECTION_MODEL || envConfig.REFLECTION_MODEL;
+const GATEWAY_MODEL = REFLECTION_MODEL_OVERRIDE || 'claude-sonnet-4-6';
+const DIRECT_MODEL = REFLECTION_MODEL_OVERRIDE || 'claude-haiku-4-5-20251001';
 const MAX_CONVERSATION_CHARS = 40_000;
 const USER_BUDGET_CHARS = 2000; // ~500 tokens
 const MEMORY_BUDGET_CHARS = 3200; // ~800 tokens
@@ -357,13 +366,87 @@ Return ONLY the rewritten markdown file content — no explanation, no code fenc
 }
 
 /** One non-streaming Messages API call; returns the text block. Throws 'truncated' on max_tokens so callers can retry. */
+// ---------------------------------------------------------------------------
+// Transport: OneCLI gateway (preferred) with direct-key fallback.
+//
+// The gateway is the same HTTPS forward proxy agent containers use: we ask it
+// for its proxy config (proxy URL + CA cert), send the request through it to
+// the real api.anthropic.com, and it swaps our auth header for the vault's
+// Anthropic credential on the wire. That credential can be a real API key,
+// which is what unlocks Sonnet. Config is fetched once and cached; any
+// gateway-path failure drops the cache (so a restarted gateway is picked up
+// next run) and the call retries directly with ANTHROPIC_API_KEY.
+// ---------------------------------------------------------------------------
+
+interface GatewayRoute {
+  dispatcher: ProxyAgent;
+}
+
+let cachedGatewayRoute: GatewayRoute | null | undefined; // undefined = not yet probed
+
+async function resolveGatewayRoute(): Promise<GatewayRoute | null> {
+  if (cachedGatewayRoute !== undefined) return cachedGatewayRoute;
+  if (!ONECLI_URL) {
+    cachedGatewayRoute = null;
+    return null;
+  }
+  try {
+    const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
+    const config = await onecli.getContainerConfig();
+    const proxyUrl = config.env.HTTPS_PROXY || config.env.https_proxy;
+    if (!proxyUrl || !config.caCertificate) {
+      cachedGatewayRoute = null;
+      return null;
+    }
+    cachedGatewayRoute = {
+      dispatcher: new ProxyAgent({
+        uri: proxyUrl,
+        // The gateway MITMs the tunneled TLS with its own CA — trust it for
+        // the proxied connection only (not process-wide).
+        requestTls: { ca: config.caCertificate },
+      }),
+    };
+    log.info('Reflection routing through OneCLI gateway', { model: GATEWAY_MODEL });
+  } catch {
+    cachedGatewayRoute = null; // gateway down — retry probe next reflection run
+  }
+  return cachedGatewayRoute;
+}
+
 async function callAnthropic(system: string, userMessage: string): Promise<string> {
-  // Bearer auth when routing through the OneCLI proxy (OAuth token); x-api-key for raw API keys.
+  const gateway = await resolveGatewayRoute();
+  if (gateway) {
+    try {
+      return await sendMessagesRequest(GATEWAY_MODEL, system, userMessage, gateway);
+    } catch (err) {
+      // Truncation is a model-output problem, not a routing problem — let the
+      // caller's retry handle it on the same (better) model.
+      if (err instanceof Error && err.message === 'truncated') throw err;
+      // Anything else (proxy down, no Anthropic secret in the vault, 429 on
+      // the injected credential): drop the cached route and fall through to
+      // the direct path so reflection keeps working.
+      cachedGatewayRoute = undefined;
+      log.warn('Gateway reflection call failed — falling back to direct API', { err });
+    }
+  }
+  return sendMessagesRequest(DIRECT_MODEL, system, userMessage, null);
+}
+
+async function sendMessagesRequest(
+  model: string,
+  system: string,
+  userMessage: string,
+  gateway: GatewayRoute | null,
+): Promise<string> {
+  // Bearer auth for OAuth tokens; x-api-key for raw API keys. On the gateway
+  // path this header is a placeholder the proxy overwrites with the vault
+  // credential (when one matches api.anthropic.com); sending our real token
+  // means the request still works if the vault has no Anthropic secret.
   const authHeaders: Record<string, string> = ANTHROPIC_API_KEY!.startsWith('sk-ant-api')
     ? { 'x-api-key': ANTHROPIC_API_KEY! }
     : { Authorization: `Bearer ${ANTHROPIC_API_KEY}` };
 
-  const response = await fetch(`${ANTHROPIC_BASE_URL}/v1/messages`, {
+  const requestInit = {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -371,12 +454,22 @@ async function callAnthropic(system: string, userMessage: string): Promise<strin
       ...authHeaders,
     },
     body: JSON.stringify({
-      model: REFLECTION_MODEL,
+      model,
       max_tokens: 8192,
       system,
       messages: [{ role: 'user', content: userMessage }],
     }),
-  });
+  };
+
+  // Node's global fetch ignores HTTPS_PROXY; undici's fetch takes an explicit
+  // dispatcher. Gateway path always targets the real Anthropic host — the
+  // proxy is the route, not the destination.
+  const response = gateway
+    ? await undiciFetch('https://api.anthropic.com/v1/messages', {
+        ...requestInit,
+        dispatcher: gateway.dispatcher,
+      })
+    : await fetch(`${ANTHROPIC_BASE_URL}/v1/messages`, requestInit);
 
   if (!response.ok) {
     throw new Error(`Anthropic API error: ${response.status} ${await response.text()}`);

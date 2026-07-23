@@ -122,12 +122,13 @@ Its job is **not** to be the main author — it's a janitor that:
    retried once; a hard failure leaves the watermark unadvanced so the next
    sweep retries.
 
-**Model.** Defaults to Haiku (`REFLECTION_MODEL` env overrides). Sonnet is the
-better choice on quality grounds — reflection's mistakes are persistent and the
-shared-vs-private split is subtle judgment — but the standard Claude Code OAuth
-token only has working Haiku access via the direct Messages API (Sonnet 429s on
-that tier). Installs with a Sonnet-capable key (a real `sk-ant-api…` key, or one
-injected via the OneCLI gateway) set `REFLECTION_MODEL=claude-sonnet-4-6`.
+**Model.** Follows the route: **Sonnet through the OneCLI gateway** (preferred
+— the vault's Anthropic credential is injected on the wire, same as agent
+containers), **Haiku on the direct-key fallback** (the standard Claude Code
+OAuth token only has working Haiku access via the direct Messages API; Sonnet
+429s on that tier). `REFLECTION_MODEL` overrides both. Sonnet matters here
+because reflection's mistakes are persistent and the keep-vs-evict call is
+subtle judgment.
 
 ### The Mem0-style reconciler — in plain terms
 
@@ -264,13 +265,17 @@ Small and contained:
   automatically on the next reflection after session activity. If consolidation
   fails or doesn't help we write the merged content anyway (losing a session's
   facts is worse) and log a warning.
-- **Model:** Haiku default, Sonnet via `REFLECTION_MODEL` when a capable key
-  exists (see Write path 2).
+- **Model & auth:** reflection prefers the OneCLI gateway — the same HTTPS
+  proxy agent containers use, which injects the vault's Anthropic credential on
+  the wire — and runs **Sonnet** on that route. If the gateway is unreachable
+  or the proxied call fails (e.g. no Anthropic secret in the vault), it falls
+  back to a direct call with `ANTHROPIC_API_KEY` on **Haiku** (the Claude Code
+  OAuth token tier), so reflection never silently stops. `REFLECTION_MODEL`
+  overrides the model on both routes. The gateway route is probed once and
+  cached; any failure drops the cache so a restarted gateway is picked up on
+  the next run.
 
 ### Still open
 
-- **Auth:** reflection calls Anthropic directly via `ANTHROPIC_API_KEY`
-  (OAuth-token aware). Routing through the OneCLI gateway would unlock Sonnet and
-  match the rest of the host's credential model.
 - **Multi-user scoping:** per-user / per-conversation memory (the scope
   assumption noted above) — deferred until real multi-user demand appears.
