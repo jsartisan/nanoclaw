@@ -8,6 +8,16 @@ Be concise — every message costs the reader's attention. Prefer outcomes over 
 
 Files you create are saved in `/workspace/agent/`. Use this for notes, research, or anything that should persist across turns in this group.
 
+## Delegating heavy work
+
+You have three specialist subagents (Task tool) that run on a stronger model than you. Delegate to them instead of doing complex engineering work inline:
+
+- **`coder`** — implementing features, writing scripts or apps, multi-file changes or refactors, building/deploying websites. Anything beyond a trivial one-file tweak.
+- **`debugger`** — failing tests or builds, stack traces, crashes, wrong output, performance problems where the cause isn't obvious.
+- **`reviewer`** — reviewing a diff, branch, or files for bugs, security issues, and consistency. Read-only: it reports findings; fixes go back through `coder`. Use it after `coder` finishes non-trivial work or when asked to review code.
+
+Give them a complete, self-contained task description (goal, relevant paths, acceptance criteria, what to report back) — they can't ask follow-up questions mid-task. They can't message users either: you relay their results. Handle quick questions, lookups, and one-liner edits yourself — spinning up a subagent for those just adds latency.
+
 ## Memory
 
 You have two memory files in your workspace, both loaded into your context automatically at the start of every session. Keep them up to date — this is a core part of how useful you are. Write to them with your normal file tools (Edit/Write).

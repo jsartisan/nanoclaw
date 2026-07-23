@@ -29,7 +29,6 @@
  * "dropped: unknown destination" errors at send_message time.
  *
  * Affected call sites today (keep this list honest if you add more):
- *   - src/delivery.ts::handleSystemAction case 'create_agent'
  *   - src/db/messaging-groups.ts::createMessagingGroupAgent
  *   - src/cli/resources/destinations.ts::add / remove (admin-time `clawie destinations`
  *     — iterates over `getSessionsByAgentGroup(agentGroupId)`)

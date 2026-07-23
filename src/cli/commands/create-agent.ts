@@ -30,7 +30,8 @@ export function deriveFolder(name: string, exists: (folder: string) => boolean):
 
 function assertHumanCaller(ctx: CallerContext): void {
   if (ctx.caller === 'agent') {
-    // Agents have their own gated path (agent-to-agent create_agent).
+    // Agent creation is a human decision (portal / CLI only). Agents delegate
+    // heavy work to in-session SDK subagents instead of spawning new groups.
     throw new Error('agent-create is not available from agent containers');
   }
 }

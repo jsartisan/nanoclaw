@@ -1,7 +1,8 @@
 /**
  * Project the agent's central `agent_destinations` rows into its per-session
  * `inbound.db` so the running container can resolve names locally. Called on
- * every container wake and after admin-time destination edits (e.g. create_agent).
+ * every container wake and after admin-time destination edits (e.g.
+ * `clawie destinations add` or wiring a new chat).
  *
  * Core container-runner calls this via a dynamic import guarded by a
  * `hasTable('agent_destinations')` check — without the agent-to-agent module

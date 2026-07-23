@@ -88,28 +88,17 @@ echo "value" | vercel env add VAR_NAME production --token placeholder
 | `ENOTFOUND api.vercel.com` | Network issue. Check proxy connectivity |
 | Auth error after `vercel whoami` | Credential may be expired. Ask the user to refresh the Vercel token in OneCLI |
 
-## Building Websites — Delegate to Frontend Engineer
+## Building Websites — Delegate to the Coder Subagent
 
-When asked to **build, create, or redesign** a website or web app, do NOT build it yourself. You MUST delegate to a Frontend Engineer agent. This is a two-step process and **both steps are required**:
+When asked to **build, create, or redesign** a website or web app, do NOT build it yourself in the main conversation. Delegate to the `coder` subagent (Task tool) — it runs on a stronger model tuned for engineering work.
 
-**Step 1 — Create the agent** (skip if you already have a "frontend-engineer" destination):
+In the Task prompt, include:
 
-```
-create_agent({
-  name: "Frontend Engineer",
-  instructions: "You are a dedicated frontend engineer. Your frontend-engineer skill has your full workflow. Build what is requested, test it visually with agent-browser, deploy to Vercel, and send back the live URL + screenshots to your parent agent when done."
-})
-```
+1. **The workflow**: tell it to first read `/app/skills/frontend-engineer/SKILL.md` and follow that build–test–verify discipline (visual verification with agent-browser, deploy to Vercel, production check).
+2. **The full build spec**: what to build, design requirements, content, colors, and any assets.
+3. **What to return**: the live URL, screenshot file paths, and any known limitations.
 
-**Step 2 — Send the build request** (MANDATORY — do this immediately after step 1):
-
-```
-send_message(to: "frontend-engineer", text: "<full description of what to build, including design requirements, content, colors, and any assets>")
-```
-
-⚠️ **CRITICAL**: If you skip step 2, nothing happens. The agent exists but has no work. You MUST send the message. Do NOT tell the user "it's working on it" until you have actually called send_message.
-
-After sending, tell the user you've handed it off and will share the result when it comes back. The Frontend Engineer will send you the live URL + screenshots when done — forward those to the user.
+When the subagent finishes, forward the live URL and screenshots to the user — the subagent cannot message users itself.
 
 **When to delegate vs do it yourself:**
 - **Delegate**: building new sites, redesigns, multi-page apps, anything that needs visual testing
